@@ -1,18 +1,18 @@
 'use client';
 
 import { useParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { formatPeso, formatDate } from '@/lib/utils/currency';
 import { toast } from 'sonner';
 import Input from '@/src/components/ui/input';
 import Button from '@/src/components/ui/button';
+import { recordCreditChange } from '../../action';
 
 interface Customer {
   id: string;
   name: string;
   phone: string | null;
-  loyalty_pts: number;
   credit_balance: number;
 }
 
@@ -25,80 +25,87 @@ interface LedgerRow {
   created_at: string;
 }
 
+type Mode = 'payment_made' | 'credit_given';
+
 export default function CustomerCreditPage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
-  const [paymentAmount, setPaymentAmount] = useState('');
+  const [mode, setMode] = useState<Mode>('payment_made');
+  const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
-  const supabaseRef = useRef<any>(null);
-  const [clientReady, setClientReady] = useState(false);
-
-  // ── Initialize Supabase client ──────────────────────────
-  useEffect(() => {
-    supabaseRef.current = createClient();
-    setClientReady(true);
-  }, []);
 
   // ── Fetch data ───────────────────────────────────────────
-  const fetchData = async () => {
-    // ✅ Guard: ensure client exists
-    if (!supabaseRef.current) return;
+  async function fetchData() {
+    if (!id) return;
+    const supabase = createClient();
 
-    const { data: cust } = await supabaseRef.current
+    const { data: cust } = await supabase
       .from('customers')
       .select('*')
       .eq('id', id)
       .single();
     setCustomer(cust);
 
-    const { data: entries } = await supabaseRef.current
+    const { data: entries } = await supabase
       .from('ledger')
       .select('*')
       .eq('customer_id', id)
       .order('created_at', { ascending: false });
     if (entries) setLedger(entries);
-  };
+  }
 
-  // ── Trigger fetch when id changes or client becomes ready ──
+  // ── Trigger fetch when id changes ───────────────────────
   useEffect(() => {
-    if (id && clientReady) {
-      fetchData();
-    }
-  }, [id, clientReady]);
+    async function load() {
+      if (!id) return;
+      const supabase = createClient();
 
-  // ── Handle payment ───────────────────────────────────────
-  const handlePayment = async () => {
-    const amount = parseFloat(paymentAmount);
-    if (!amount || amount <= 0) {
+      const { data: cust } = await supabase
+        .from('customers')
+        .select('*')
+        .eq('id', id)
+        .single();
+      setCustomer(cust);
+
+      const { data: entries } = await supabase
+        .from('ledger')
+        .select('*')
+        .eq('customer_id', id)
+        .order('created_at', { ascending: false });
+      if (entries) setLedger(entries);
+    }
+    load();
+  }, [id]);
+
+  // ── Handle payment / add-balance ────────────────────────
+  // Routed through the record_credit_change RPC via a server action, same as
+  // every other credit mutation in the app — this used to insert into
+  // `ledger` directly with a client-computed running_balance, which never
+  // actually updated customers.credit_balance, so "Outstanding credit" went
+  // stale after every "payment". The RPC updates both atomically.
+  const handleSubmit = async () => {
+    const value = parseFloat(amount);
+    if (!value || value <= 0) {
       toast.error('Enter a valid amount');
       return;
     }
-
-    // ✅ Guard: ensure client exists
-    if (!supabaseRef.current) {
-      toast.error('Client not ready');
-      return;
-    }
+    if (!id || Array.isArray(id)) return;
 
     setSaving(true);
-    const currentBalance = customer?.credit_balance || 0;
-    const newBalance = currentBalance - amount;
-
-    const { error } = await supabaseRef.current.from('ledger').insert({
-      customer_id: id,
-      entry_type: 'payment_made',
-      amount,
-      running_balance: newBalance,
-      description: note || 'Payment received',
-    });
+    const { error } = await recordCreditChange(
+      id,
+      mode,
+      value,
+      note || (mode === 'payment_made' ? 'Payment received' : 'Credit added')
+    );
 
     if (error) {
-      toast.error('Error recording payment: ' + error.message);
+      toast.error(error);
     } else {
-      toast.success('Payment recorded');
-      setPaymentAmount('');
+      toast.success(mode === 'payment_made' ? 'Payment recorded' : 'Balance added');
+      setAmount('');
       setNote('');
       fetchData(); // refresh the list
     }
@@ -113,23 +120,51 @@ export default function CustomerCreditPage() {
     <div className="p-6 max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold text-ink">{customer.name}</h1>
       <p className="text-sm text-ink-faint mt-1">
-        Phone: {customer.phone || 'N/A'} · Loyalty: {customer.loyalty_pts} pts
+        Phone: {customer.phone || 'N/A'}
       </p>
       <p className="text-xl font-bold text-gold mt-2 tabular">
         Outstanding credit: {formatPeso(customer.credit_balance)}
       </p>
 
-      {/* Payment Form */}
+      {/* Payment / Add balance form */}
       <div className="bg-gold-soft border border-gold/20 p-4 rounded-2xl my-6">
-        <h2 className="font-semibold text-ink mb-3">Record payment</h2>
+        {/* Mode toggle */}
+        <div className="flex gap-1.5 mb-3">
+          <button
+            onClick={() => setMode('payment_made')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              mode === 'payment_made'
+                ? 'bg-primary text-white border-primary'
+                : 'bg-surface text-ink-soft border-border hover:border-primary'
+            }`}
+          >
+            Record payment
+          </button>
+          <button
+            onClick={() => setMode('credit_given')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              mode === 'credit_given'
+                ? 'bg-gold text-white border-gold'
+                : 'bg-surface text-ink-soft border-border hover:border-gold'
+            }`}
+          >
+            Add balance
+          </button>
+        </div>
+        <p className="text-xs text-ink-faint mb-3">
+          {mode === 'payment_made'
+            ? 'Customer paid down some or all of their outstanding credit.'
+            : "Add to what the customer owes — for utang made outside the POS (e.g. logged after the fact)."}
+        </p>
+
         <div className="flex flex-wrap gap-3 items-start">
           <div className="w-40">
             <Input
               type="number"
-              placeholder="Amount paid"
+              placeholder={mode === 'payment_made' ? 'Amount paid' : 'Amount to add'}
               prefix="₱"
-              value={paymentAmount}
-              onChange={(e) => setPaymentAmount(e.target.value)}
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
               className="tabular"
             />
           </div>
@@ -141,8 +176,8 @@ export default function CustomerCreditPage() {
               onChange={(e) => setNote(e.target.value)}
             />
           </div>
-          <Button onClick={handlePayment} disabled={saving}>
-            {saving ? 'Saving…' : 'Confirm payment'}
+          <Button onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Saving…' : mode === 'payment_made' ? 'Confirm payment' : 'Add balance'}
           </Button>
         </div>
       </div>

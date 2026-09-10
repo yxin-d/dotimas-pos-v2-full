@@ -15,7 +15,7 @@ import CloseDayModal from './close-day-modal'
 import ShiftModal from './shift-modal'
 import Receipt from './receipt'
 import { formatPeso } from '@/lib/utils/currency'
-import { Search, PowerOff, Scan, Ban, User, Menu } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, Staff, PosSession, StaffShift } from '@/types/database'
@@ -34,6 +34,7 @@ export default function PosClient({ staff, session, activeShift, categories }: P
   const [products, setProducts] = useState<Product[]>([])
   const [activeCategory, setActiveCategory] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [showInactive, setShowInactive] = useState(false)
   const [loading, setLoading] = useState(true)
   const [activeModal, setActiveModal] = useState<ActiveModal>(null)
   const [mobileCartOpen, setMobileCartOpen] = useState(false)
@@ -54,9 +55,9 @@ export default function PosClient({ staff, session, activeShift, categories }: P
       let query = supabaseRef.current
         .from('products')
         .select('*, product_categories(name)')
-        .eq('is_active', true)
         .order('name')
 
+      if (!showInactive) query = query.eq('is_active', true)
       if (activeCategory) query = query.eq('category_id', activeCategory)
       if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%`)
 
@@ -70,7 +71,7 @@ export default function PosClient({ staff, session, activeShift, categories }: P
     }
     const t = setTimeout(load, search ? 250 : 0)
     return () => clearTimeout(t)
-  }, [activeCategory, search])
+  }, [activeCategory, search, showInactive])
 
   // Barcode scanner: exact match on barcode adds straight to cart
   const handleScan = useCallback((barcode: string) => {
@@ -154,8 +155,8 @@ export default function PosClient({ staff, session, activeShift, categories }: P
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Search */}
-          <div className="px-4 py-2.5 border-b border-border shrink-0">
-            <div className="flex items-center gap-2 bg-canvas border border-border rounded-xl px-3 py-2">
+          <div className="px-4 py-2.5 border-b border-border shrink-0 flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2 bg-canvas border border-border rounded-xl px-3 py-2">
               <Search size={15} className="text-ink-faint" />
               <input
                 value={search}
@@ -164,6 +165,18 @@ export default function PosClient({ staff, session, activeShift, categories }: P
                 className="flex-1 text-sm bg-transparent outline-none"
               />
             </div>
+            <button
+              onClick={() => setShowInactive(v => !v)}
+              title="Show inactive products"
+              className={`shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold transition-colors ${
+                showInactive
+                  ? 'bg-primary text-white border-primary'
+                  : 'bg-canvas text-ink-faint border-border hover:border-primary hover:text-primary'
+              }`}
+            >
+              <EyeOff size={14} />
+              <span className="hidden sm:inline">Inactive</span>
+            </button>
           </div>
 
           {/* Category pills */}

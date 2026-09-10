@@ -19,25 +19,25 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  // Show registered customers right away instead of requiring a search first.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing results synchronously on empty query is intentional
-    if (!query.trim()) { setCustomers([]); return }
+    let cancelled = false
+    const supabase = createClient()
 
     const timeout = setTimeout(async () => {
       setLoading(true)
-      const supabase = createClient()
-      const { data } = await supabase
-        .from('customers')
-        .select('*')
-        .ilike('name', `%${query}%`)
-        .order('name')
-        .limit(8)
+      const req = query.trim()
+        ? supabase.from('customers').select('*').ilike('name', `%${query.trim()}%`).order('name').limit(20)
+        : supabase.from('customers').select('*').order('name').limit(20)
 
-      setCustomers(data ?? [])
-      setLoading(false)
-    }, 250)
+      const { data } = await req
+      if (!cancelled) {
+        setCustomers(data ?? [])
+        setLoading(false)
+      }
+    }, query.trim() ? 250 : 0)
 
-    return () => clearTimeout(timeout)
+    return () => { cancelled = true; clearTimeout(timeout) }
   }, [query])
 
   return (
@@ -63,12 +63,14 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
         {/* Results */}
         <div className="max-h-72 overflow-y-auto divide-y divide-border">
           {loading && (
-            <div className="px-4 py-3 text-xs text-ink-faint">Searching…</div>
+            <div className="px-4 py-3 text-xs text-ink-faint">{query ? 'Searching…' : 'Loading customers…'}</div>
           )}
 
-          {!loading && query && customers.length === 0 && (
+          {!loading && customers.length === 0 && (
             <div className="px-4 py-4 text-center">
-              <p className="text-sm text-ink-faint mb-2">No customer found for &quot;{query}&quot;</p>
+              <p className="text-sm text-ink-faint mb-2">
+                {query ? <>No customer found for &quot;{query}&quot;</> : 'No customers registered yet'}
+              </p>
               <button className="flex items-center gap-1.5 mx-auto text-xs text-primary hover:underline">
                 <UserPlus size={12} />
                 Add new customer
@@ -76,7 +78,7 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
             </div>
           )}
 
-          {customers.map(c => (
+          {!loading && customers.map(c => (
             <button
               key={c.id}
               onClick={() => onSelect(c)}
@@ -99,12 +101,6 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
             </button>
           ))}
         </div>
-
-        {!query && (
-          <div className="px-4 py-6 text-center text-xs text-ink-faint">
-            Start typing to search customers
-          </div>
-        )}
       </div>
     </div>
   )

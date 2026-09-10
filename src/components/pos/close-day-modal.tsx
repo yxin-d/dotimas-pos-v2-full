@@ -25,8 +25,12 @@ export default function CloseDayModal({ onClose, onDone }: CloseDayModalProps) {
     }
     setLoading(true)
     try {
-      const res = await closeDay(amount, notes || undefined)
-      setResult(res)
+      const { data, error } = await closeDay(amount, notes || undefined)
+      if (error || !data) {
+        toast.error(error ?? 'Could not close the day')
+        return
+      }
+      setResult(data)
       toast.success('Day closed')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not close the day')

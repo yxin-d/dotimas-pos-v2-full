@@ -24,7 +24,11 @@ export default function ShiftModal({ mode, staffName, onDone }: ShiftModalProps)
       }
       setLoading(true)
       try {
-        await startShift(amount)
+        const { error } = await startShift(amount)
+        if (error) {
+          toast.error(error)
+          return
+        }
         toast.success('Day started')
         onDone()
       } catch (err) {
@@ -37,7 +41,11 @@ export default function ShiftModal({ mode, staffName, onDone }: ShiftModalProps)
 
     setLoading(true)
     try {
-      await startShift()
+      const { error } = await startShift()
+      if (error) {
+        toast.error(error)
+        return
+      }
       toast.success('Shift started')
       onDone()
     } catch (err) {

@@ -80,12 +80,16 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
 
     setLoading(true)
     try {
-      const { invoiceId } = await completeSale({
+      const { invoiceId, error } = await completeSale({
         customerId: customer?.id ?? null,
         isCredit,
         payments,
         items: buildItemsPayload(),
       })
+      if (error || !invoiceId) {
+        toast.error(error ?? 'Checkout failed')
+        return
+      }
       toast.success('Sale complete')
       clearCart()
       onComplete(invoiceId)
