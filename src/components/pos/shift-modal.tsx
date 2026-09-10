@@ -9,9 +9,10 @@ interface ShiftModalProps {
   mode: 'open_day' | 'start_shift'
   staffName: string
   onDone: () => void
+  onDismiss?: () => void
 }
 
-export default function ShiftModal({ mode, staffName, onDone }: ShiftModalProps) {
+export default function ShiftModal({ mode, staffName, onDone, onDismiss }: ShiftModalProps) {
   const [cash, setCash] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -97,6 +98,16 @@ export default function ShiftModal({ mode, staffName, onDone }: ShiftModalProps)
         >
           {loading ? 'Starting…' : mode === 'open_day' ? 'Open the day' : 'Start shift'}
         </button>
+
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            disabled={loading}
+            className="w-full text-center text-xs font-semibold text-ink-faint hover:text-ink-soft py-1 disabled:opacity-60"
+          >
+            {mode === 'open_day' ? "I'll open the day later" : "I'll start my shift later"}
+          </button>
+        )}
       </div>
     </div>
   )

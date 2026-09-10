@@ -15,7 +15,7 @@ import CloseDayModal from './close-day-modal'
 import ShiftModal from './shift-modal'
 import Receipt from './receipt'
 import { formatPeso } from '@/lib/utils/currency'
-import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff, Lock } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, Staff, PosSession, StaffShift } from '@/types/database'
@@ -97,8 +97,32 @@ export default function PosClient({ staff, session, activeShift, categories }: P
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // "needsShift" covers two very different situations that used to be
+  // treated the same: (1) the day/shift genuinely needs opening — actionable
+  // — vs (2) today's day has already been closed, which the close_day/
+  // start_shift RPCs treat as final for the rest of the calendar day (see
+  // "Today's day has already been closed" in start_shift). Previously, right
+  // after closing the day, this would immediately re-show the ShiftModal in
+  // "open_day" mode — a modal that could never actually succeed, since a
+  // session already exists for today. Now a closed day gets its own locked
+  // state instead of a modal that's doomed to fail.
   const needsShift = !activeShift
+  const dayClosed = session?.status === 'closed'
   const shiftMode = session && session.status === 'open' ? 'start_shift' : 'open_day'
+
+  // Reset the dismissal whenever the underlying session/shift identity
+  // changes (day closed and reopened tomorrow, shift started elsewhere,
+  // etc.) so a stale dismissal doesn't carry over. Adjusting state directly
+  // during render (guarded by comparing against the last-seen key) is the
+  // pattern React recommends for "reset this when that identity changes" —
+  // it avoids the extra render pass a useEffect here would cause.
+  const shiftKey = `${session?.id ?? 'none'}:${activeShift?.id ?? 'none'}`
+  const [shiftPromptDismissed, setShiftPromptDismissed] = useState(false)
+  const [lastShiftKey, setLastShiftKey] = useState(shiftKey)
+  if (shiftKey !== lastShiftKey) {
+    setLastShiftKey(shiftKey)
+    setShiftPromptDismissed(false)
+  }
 
   return (
     <div className="flex flex-col h-screen bg-canvas">
@@ -152,7 +176,7 @@ export default function PosClient({ staff, session, activeShift, categories }: P
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Search */}
           <div className="px-4 py-2.5 border-b border-border shrink-0 flex items-center gap-2">
@@ -209,6 +233,14 @@ export default function PosClient({ staff, session, activeShift, categories }: P
           isMobileOpen={mobileCartOpen}
           onMobileClose={() => setMobileCartOpen(false)}
         />
+
+        {needsShift && staff && (dayClosed || shiftPromptDismissed) && (
+          <ShiftLockedOverlay
+            dayClosed={dayClosed}
+            mode={shiftMode}
+            onOpen={dayClosed ? undefined : () => setShiftPromptDismissed(false)}
+          />
+        )}
       </div>
 
       {activeModal === 'checkout' && (
@@ -223,8 +255,13 @@ export default function PosClient({ staff, session, activeShift, categories }: P
       {receiptId && <Receipt invoiceId={receiptId} onClose={() => setReceiptId(null)} />}
       {navOpen && <PosNavDrawer onClose={() => setNavOpen(false)} />}
 
-      {needsShift && staff && (
-        <ShiftModal mode={shiftMode} staffName={staff.name} onDone={() => router.refresh()} />
+      {needsShift && staff && !dayClosed && !shiftPromptDismissed && (
+        <ShiftModal
+          mode={shiftMode}
+          staffName={staff.name}
+          onDone={() => router.refresh()}
+          onDismiss={() => setShiftPromptDismissed(true)}
+        />
       )}
     </div>
   )
@@ -240,5 +277,56 @@ function CategoryTab({ label, active, onClick }: { label: string; active: boolea
     >
       {label}
     </button>
+  )
+}
+
+// Covers the product grid + cart (not the top bar) while sales are locked —
+// either because today's day is already closed for good, or because the
+// cashier chose "I'll open later" / "I'll start my shift later" from the
+// ShiftModal. dayClosed gets no action button since there's genuinely
+// nothing to do until the date rolls over; the dismissed case gets a button
+// that brings the ShiftModal back.
+function ShiftLockedOverlay({
+  dayClosed,
+  mode,
+  onOpen,
+}: {
+  dayClosed: boolean
+  mode: 'open_day' | 'start_shift'
+  onOpen?: () => void
+}) {
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-canvas/95 backdrop-blur-sm p-6">
+      <div className="text-center max-w-xs flex flex-col items-center gap-3">
+        <div className="w-12 h-12 rounded-full bg-surface-sunken text-ink-faint flex items-center justify-center">
+          <Lock size={20} />
+        </div>
+        {dayClosed ? (
+          <>
+            <h3 className="font-bold text-ink">Day closed</h3>
+            <p className="text-sm text-ink-faint">
+              Today&apos;s books are already closed and can&apos;t be reopened. Sales are locked until a new day is opened.
+            </p>
+          </>
+        ) : (
+          <>
+            <h3 className="font-bold text-ink">
+              {mode === 'open_day' ? 'Day not started' : 'Shift not started'}
+            </h3>
+            <p className="text-sm text-ink-faint">
+              {mode === 'open_day'
+                ? "You chose to open the day later. Sales are locked until you open it."
+                : "You chose to start your shift later. Sales are locked until you clock in."}
+            </p>
+            <button
+              onClick={onOpen}
+              className="mt-1 rounded-xl bg-primary text-white font-bold px-5 py-2.5 text-sm"
+            >
+              {mode === 'open_day' ? 'Open the day' : 'Start shift'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   )
 }
