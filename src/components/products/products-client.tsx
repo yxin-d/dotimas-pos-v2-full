@@ -21,6 +21,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   const [products, setProducts] = useState<Product[]>(initialProducts)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState<string>('')
+  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'inactive'>('')
   const [loading, setLoading] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [previewMode, setPreviewMode] = useState<'edit' | 'create' | null>(null)
@@ -33,12 +34,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
     const supabase = createClient()
     let query = supabase.from('products').select('*, product_categories(name)').order('name')
     if (categoryFilter) query = query.eq('category_id', categoryFilter)
+    if (statusFilter) query = query.eq('is_active', statusFilter === 'active')
     if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%,sku.ilike.%${search}%`)
     const { data, error } = await query
     if (error) toast.error('Failed to load products: ' + error.message)
     setProducts(data ?? [])
     setLoading(false)
-  }, [search, categoryFilter])
+  }, [search, categoryFilter, statusFilter])
 
   useEffect(() => {
     const t = setTimeout(refresh, search ? 250 : 0)
@@ -140,6 +142,11 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
           <option value="">All categories</option>
           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as '' | 'active' | 'inactive')} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
+          <option value="">All statuses</option>
+          <option value="active">Active only</option>
+          <option value="inactive">Inactive only</option>
+        </select>
         <div className="flex items-center gap-2 bg-primary-soft border border-dashed border-primary rounded-xl px-3 py-2 text-xs font-bold text-primary-dark">
           <Scan size={14} /> Scan to find
         </div>
@@ -156,6 +163,18 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
             </div>
           ) : (
             <div className="flex flex-col gap-px max-h-[70vh] overflow-y-auto">
+              <div className="flex items-center gap-3 px-4 py-2 bg-surface text-xs font-semibold text-ink-faint">
+                <input
+                  type="checkbox"
+                  checked={products.length > 0 && products.every(p => selectedIds.has(p.id))}
+                  onChange={e => {
+                    if (e.target.checked) setSelectedIds(new Set(products.map(p => p.id)))
+                    else setSelectedIds(new Set())
+                  }}
+                  className="accent-primary shrink-0"
+                />
+                Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
+              </div>
               {products.map(p => (
                 <button
                   key={p.id}
@@ -198,7 +217,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
 
       {showBulkEdit && (
         <BulkEditModal
-          selectedIds={Array.from(selectedIds)}
+          products={products.filter(p => selectedIds.has(p.id))}
           categories={categories}
           onClose={() => setShowBulkEdit(false)}
           onDone={() => { setShowBulkEdit(false); setSelectedIds(new Set()); refresh() }}

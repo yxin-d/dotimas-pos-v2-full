@@ -2,48 +2,49 @@
 
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { X, Layers } from 'lucide-react'
-import { bulkUpdateProducts } from '@/src/app/(app)/products/action'
-import type { ProductCategory } from '@/types/database'
+import { X, Layers, Check } from 'lucide-react'
+import { batchEditProducts, type RowEdit } from '@/src/app/(app)/products/action'
+import type { Product, ProductCategory } from '@/types/database'
 
 interface Props {
-  selectedIds: string[]
+  products: Product[]        // the full records for whatever's currently selected
   categories: ProductCategory[]
   onClose: () => void
   onDone: () => void
 }
 
-export default function BulkEditModal({ selectedIds, categories, onClose, onDone }: Props) {
-  const [applyCategory, setApplyCategory] = useState(false)
-  const [categoryId, setCategoryId] = useState('')
-  const [applyPrice, setApplyPrice] = useState(false)
-  const [price, setPrice] = useState('')
-  const [applyActive, setApplyActive] = useState(false)
-  const [active, setActive] = useState(true)
+// Each selected product gets its own row and its own values — this is a
+// batch of individual edits happening in one place, not one value stamped
+// across everything selected.
+export default function BulkEditModal({ products, categories, onClose, onDone }: Props) {
+  const [rows, setRows] = useState<RowEdit[]>(() =>
+    products.map(p => ({
+      id: p.id,
+      price: p.price,
+      cost: p.cost,
+      barcode: p.barcode,
+      category_id: p.category_id,
+      is_active: p.is_active,
+    }))
+  )
   const [saving, setSaving] = useState(false)
 
-  async function handleApply() {
-    const changes: Record<string, unknown> = {}
-    if (applyCategory) changes.category_id = categoryId || null
-    if (applyPrice) {
-      const p = parseFloat(price)
-      if (isNaN(p) || p < 0) { toast.error('Enter a valid price'); return }
-      changes.price = p
-    }
-    if (applyActive) changes.is_active = active
+  function updateRow<K extends keyof RowEdit>(id: string, key: K, value: RowEdit[K]) {
+    setRows(rs => rs.map(r => r.id === id ? { ...r, [key]: value } : r))
+  }
 
-    if (Object.keys(changes).length === 0) {
-      toast.error('Turn on at least one field to apply')
-      return
-    }
-
+  async function handleSaveAll() {
     setSaving(true)
     try {
-      await bulkUpdateProducts(selectedIds, changes)
-      toast.success(`Updated ${selectedIds.length} product${selectedIds.length === 1 ? '' : 's'}`)
+      const result = await batchEditProducts(rows)
+      if (result.failed > 0) {
+        toast.error(`${result.updated} saved, ${result.failed} failed`)
+      } else {
+        toast.success(`Saved ${result.updated} product${result.updated === 1 ? '' : 's'}`)
+      }
       onDone()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Bulk update failed')
+      toast.error(err instanceof Error ? err.message : 'Batch save failed')
     } finally {
       setSaving(false)
     }
@@ -51,65 +52,79 @@ export default function BulkEditModal({ selectedIds, categories, onClose, onDone
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
-      <div className="w-full max-w-sm bg-surface rounded-2xl border border-border p-6 flex flex-col gap-4">
-        <div className="flex items-center justify-between">
+      <div className="w-full max-w-3xl bg-surface rounded-2xl border border-border flex flex-col max-h-[85vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <Layers size={17} className="text-primary" />
-            <h2 className="font-bold text-ink">Bulk edit {selectedIds.length} product{selectedIds.length === 1 ? '' : 's'}</h2>
+            <h2 className="font-bold text-ink">Edit {rows.length} product{rows.length === 1 ? '' : 's'}</h2>
           </div>
           <button onClick={onClose} className="text-ink-faint hover:text-ink"><X size={18} /></button>
         </div>
 
-        <ToggleRow label="Set category" checked={applyCategory} onChange={setApplyCategory}>
-          <select value={categoryId} onChange={e => setCategoryId(e.target.value)} className="rounded-lg border border-border bg-canvas px-2.5 py-1.5 text-sm w-full">
-            <option value="">Uncategorized</option>
-            {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </ToggleRow>
-
-        <ToggleRow label="Set price" checked={applyPrice} onChange={setApplyPrice}>
-          <input
-            type="number" inputMode="decimal" value={price} onChange={e => setPrice(e.target.value)}
-            placeholder="0.00"
-            className="tabular rounded-lg border border-border bg-canvas px-2.5 py-1.5 text-sm font-bold w-full"
-          />
-        </ToggleRow>
-
-        <ToggleRow label="Set active status" checked={applyActive} onChange={setApplyActive}>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setActive(true)}
-              className={`flex-1 rounded-lg py-1.5 text-xs font-semibold ${active ? 'bg-primary text-white' : 'bg-canvas border border-border text-ink-soft'}`}
-            >Active</button>
-            <button
-              onClick={() => setActive(false)}
-              className={`flex-1 rounded-lg py-1.5 text-xs font-semibold ${!active ? 'bg-danger text-white' : 'bg-canvas border border-border text-ink-soft'}`}
-            >Inactive</button>
+        <div className="flex-1 overflow-y-auto">
+          <div className="grid grid-cols-[1.6fr_0.9fr_0.9fr_1fr_1.1fr_0.6fr] gap-2 px-5 py-2 text-[10px] font-bold text-ink-faint uppercase tracking-wide sticky top-0 bg-surface border-b border-border">
+            <span>Product</span>
+            <span>Price</span>
+            <span>Cost</span>
+            <span>Barcode</span>
+            <span>Category</span>
+            <span>Active</span>
           </div>
-        </ToggleRow>
 
-        <button
-          onClick={handleApply}
-          disabled={saving}
-          className="w-full rounded-xl bg-primary text-white font-bold py-3 mt-1 disabled:opacity-60"
-        >
-          {saving ? 'Applying…' : `Apply to ${selectedIds.length}`}
-        </button>
+          {products.map(product => {
+            const row = rows.find(r => r.id === product.id)!
+            return (
+              <div key={product.id} className="grid grid-cols-[1.6fr_0.9fr_0.9fr_1fr_1.1fr_0.6fr] gap-2 px-5 py-2.5 items-center border-b border-border last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-ink truncate">{product.name}</p>
+                  <p className="text-[11px] text-ink-faint">{product.volume ?? '\u00A0'}</p>
+                </div>
+                <input
+                  type="number" inputMode="decimal" value={row.price}
+                  onChange={e => updateRow(product.id, 'price', parseFloat(e.target.value) || 0)}
+                  className="tabular rounded-lg border border-border bg-canvas px-2 py-1.5 text-sm font-bold text-ink w-full outline-none focus-visible:border-primary"
+                />
+                <input
+                  type="number" inputMode="decimal" value={row.cost}
+                  onChange={e => updateRow(product.id, 'cost', parseFloat(e.target.value) || 0)}
+                  className="tabular rounded-lg border border-border bg-canvas px-2 py-1.5 text-sm text-ink w-full outline-none focus-visible:border-primary"
+                />
+                <input
+                  value={row.barcode ?? ''} placeholder="Optional"
+                  onChange={e => updateRow(product.id, 'barcode', e.target.value || null)}
+                  className="rounded-lg border border-border bg-canvas px-2 py-1.5 text-xs text-ink w-full outline-none focus-visible:border-primary"
+                />
+                <select
+                  value={row.category_id ?? ''}
+                  onChange={e => updateRow(product.id, 'category_id', e.target.value || null)}
+                  className="rounded-lg border border-border bg-canvas px-2 py-1.5 text-xs text-ink-soft w-full outline-none focus-visible:border-primary"
+                >
+                  <option value="">Uncategorized</option>
+                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <label className="flex items-center justify-center">
+                  <input
+                    type="checkbox" checked={row.is_active}
+                    onChange={e => updateRow(product.id, 'is_active', e.target.checked)}
+                    className="accent-primary w-4 h-4"
+                  />
+                </label>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="px-5 py-4 border-t border-border shrink-0">
+          <button
+            onClick={handleSaveAll}
+            disabled={saving}
+            className="w-full flex items-center justify-center gap-2 rounded-xl bg-primary text-white font-bold py-3 disabled:opacity-60"
+          >
+            <Check size={16} />
+            {saving ? 'Saving…' : `Save all ${rows.length}`}
+          </button>
+        </div>
       </div>
-    </div>
-  )
-}
-
-function ToggleRow({ label, checked, onChange, children }: {
-  label: string; checked: boolean; onChange: (v: boolean) => void; children: React.ReactNode
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <label className="flex items-center gap-2 text-sm font-semibold text-ink cursor-pointer">
-        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="accent-primary" />
-        {label}
-      </label>
-      {checked && <div className="pl-6">{children}</div>}
     </div>
   )
 }

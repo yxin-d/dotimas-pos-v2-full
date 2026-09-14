@@ -72,20 +72,49 @@ export async function updateProduct(id: string, payload: ProductPayload) {
 
 // ------------------- BULK EDIT -------------------
 
-export interface BulkEditPayload {
-  category_id?: string | null
-  price?: number
-  is_active?: boolean
+export interface RowEdit {
+  id: string
+  price: number
+  cost: number
+  barcode: string | null
+  category_id: string | null
+  is_active: boolean
 }
 
-export async function bulkUpdateProducts(ids: string[], changes: BulkEditPayload) {
-  if (ids.length === 0) throw new Error('No products selected')
+export interface BatchEditResult {
+  updated: number
+  failed: number
+  errors: string[]
+}
+
+// Each selected product gets its own values, not one value applied to all —
+// still one server action call from the UI's perspective, but internally
+// this is N individual updates since each row can genuinely differ.
+export async function batchEditProducts(rows: RowEdit[]): Promise<BatchEditResult> {
+  if (rows.length === 0) throw new Error('No products to update')
   const supabase = await createClient()
 
-  const { error } = await supabase.from('products').update(changes).in('id', ids)
-  if (error) throw new Error(error.message)
+  let updated = 0
+  const errors: string[] = []
+
+  for (const row of rows) {
+    const { error } = await supabase
+      .from('products')
+      .update({
+        price: row.price,
+        cost: row.cost,
+        barcode: row.barcode,
+        category_id: row.category_id,
+        is_active: row.is_active,
+      })
+      .eq('id', row.id)
+
+    if (error) errors.push(error.message)
+    else updated++
+  }
+
   revalidatePath('/products')
-  return { updated: ids.length }
+  return { updated, failed: errors.length, errors }
 }
 
 // ------------------- IMPORT -------------------
