@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { Printer, X } from 'lucide-react'
@@ -24,11 +25,26 @@ export default function Receipt({ invoiceId, onClose }: Props) {
   useEffect(() => {
     async function load() {
       const supabase = createClient()
+      // sale_invoice has TWO foreign keys into staff — staff_id (who rang up
+      // the sale) and voided_by (who voided it) — so an unqualified
+      // "staff(name)" embed is ambiguous and PostgREST rejects the whole
+      // request (PGRST201). The !sale_invoice_staff_id_fkey hint tells it
+      // which relationship to follow. This is why the receipt used to render
+      // nothing after checkout: the query errored out and the failure was
+      // never surfaced, so it just looked like the feature had disappeared.
       const [invoiceRes, linesRes, paymentsRes] = await Promise.all([
-        supabase.from('sale_invoice').select('*, customers(name), staff(name)').eq('id', invoiceId).single(),
+        supabase
+          .from('sale_invoice')
+          .select('*, customers(name), staff!sale_invoice_staff_id_fkey(name)')
+          .eq('id', invoiceId)
+          .single(),
         supabase.from('sales').select('*').eq('invoice_id', invoiceId),
         supabase.from('invoice_payments').select('*').eq('invoice_id', invoiceId),
       ])
+      if (invoiceRes.error) {
+        console.error('Failed to load receipt', invoiceRes.error)
+        toast.error(`Couldn't load the receipt: ${invoiceRes.error.message}`)
+      }
       if (invoiceRes.data && linesRes.data) {
         setData({
           invoice: invoiceRes.data as ReceiptData['invoice'],

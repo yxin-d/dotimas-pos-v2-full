@@ -15,7 +15,7 @@ import CloseDayModal from './close-day-modal'
 import ShiftModal from './shift-modal'
 import Receipt from './receipt'
 import { formatPeso } from '@/lib/utils/currency'
-import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff, Lock } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff, Lock, Receipt as ReceiptIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, Staff, PosSession, StaffShift } from '@/types/database'
@@ -40,7 +40,30 @@ export default function PosClient({ staff, session, activeShift, categories }: P
   const [mobileCartOpen, setMobileCartOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const [receiptId, setReceiptId] = useState<string | null>(null)
+  // Whether the receipt pops up automatically right after a sale completes.
+  // The receipt itself is never optional — it's restored and always
+  // reachable via "View last receipt" below — but forcing it open on every
+  // single sale isn't always wanted (e.g. quick repeat snack sales), so this
+  // makes the auto-popup itself a per-device preference. Persisted the same
+  // way the sidebar-collapsed preference is (see AppLayout), since this is a
+  // per-cashier/per-device UI setting, not data that needs to live in Supabase.
+  // Lazy initializer (read once on mount, no effect) — same pattern
+  // AppLayout uses for sidebar-collapsed. Defaults to true (matches
+  // "restored"); only an explicit 'false' in storage turns it off.
+  const [autoShowReceipt, setAutoShowReceipt] = useState(() => {
+    if (typeof window === 'undefined') return true
+    return localStorage.getItem('pos-auto-receipt') !== 'false'
+  })
+  const [lastInvoiceId, setLastInvoiceId] = useState<string | null>(null)
   const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null)
+
+  function toggleAutoShowReceipt() {
+    setAutoShowReceipt(v => {
+      const next = !v
+      localStorage.setItem('pos-auto-receipt', String(next))
+      return next
+    })
+  }
 
   const { addItem, items: cartItems, total: cartTotal, itemCount: cartItemCount } = useCart()
 
@@ -150,6 +173,27 @@ export default function PosClient({ staff, session, activeShift, categories }: P
               {staff.name}
             </div>
           )}
+          {lastInvoiceId && (
+            <button
+              onClick={() => setReceiptId(lastInvoiceId)}
+              title="View last receipt"
+              className="p-2 rounded-xl border border-border text-ink-faint hover:text-primary hover:border-primary/40 transition-colors"
+            >
+              <ReceiptIcon size={16} />
+            </button>
+          )}
+          <button
+            onClick={toggleAutoShowReceipt}
+            title={autoShowReceipt ? 'Receipt pops up automatically after each sale — click to turn off' : 'Receipt stays closed after a sale — click to auto-show it again'}
+            className={`shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold transition-colors ${
+              autoShowReceipt
+                ? 'bg-primary text-white border-primary'
+                : 'bg-surface text-ink-faint border-border hover:border-primary hover:text-primary'
+            }`}
+          >
+            <ReceiptIcon size={14} />
+            <span className="hidden sm:inline">Auto-receipt</span>
+          </button>
           <button
             onClick={() => setActiveModal('priceChecker')}
             title="Price checker"
@@ -244,7 +288,18 @@ export default function PosClient({ staff, session, activeShift, categories }: P
       </div>
 
       {activeModal === 'checkout' && (
-        <CheckoutModal onClose={() => setActiveModal(null)} onComplete={id => { setActiveModal(null); setReceiptId(id) }} />
+        <CheckoutModal
+          onClose={() => setActiveModal(null)}
+          onComplete={id => {
+            // CheckoutModal already toasts "Sale complete" itself — this
+            // only adds a pointer to the receipt when auto-show is off,
+            // rather than repeating that message.
+            setActiveModal(null)
+            setLastInvoiceId(id)
+            if (autoShowReceipt) setReceiptId(id)
+            else toast.info('Tap the receipt icon up top to view or print it.')
+          }}
+        />
       )}
       {activeModal === 'customItem' && <CustomItemModal onClose={() => setActiveModal(null)} />}
       {activeModal === 'void' && <VoidModal onClose={() => setActiveModal(null)} onDone={() => setActiveModal(null)} />}
