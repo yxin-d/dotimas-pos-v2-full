@@ -102,27 +102,28 @@ body {
 }
 
 /*
-  Add these rules to your globals.css (or import this file there).
-  Handles 80mm thermal printer receipt layout.
+  Receipt printing (80mm thermal printer).
 
-  In your layout.tsx, add this to <head>:
-    <link rel="stylesheet" href="/print.css" media="print" />
-
-  Or just paste into globals.css — the @media print block isolates it.
+  Only [data-print-receipt] is printed. Everything else is made INVISIBLE
+  rather than display:none — the receipt lives deep inside the page, and
+  hiding its ancestors with display:none (the old `body > *` rule) hid the
+  receipt along with them, so prints came out blank.
 */
-
 @media print {
-  /* Hide the entire page UI */
-  body > * {
-    display: none !important;
+  body * {
+    visibility: hidden !important;
   }
 
-  /* Hide the modal overlay inside the receipt component */
+  /* The on-screen receipt modal/overlay shouldn't take up space either */
   [data-print-hide] {
     display: none !important;
   }
 
-  /* Show only the receipt content */
+  [data-print-receipt],
+  [data-print-receipt] * {
+    visibility: visible !important;
+  }
+
   [data-print-receipt] {
     display: block !important;
     position: fixed;
@@ -132,6 +133,20 @@ body {
     padding: 4mm;
     background: white !important;
     color: #000 !important;
+  }
+
+  /* Collapse the (invisible) page so it can't spill onto extra blank
+     pages. The receipt is position:fixed, so it isn't clipped by this. */
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+  }
+  body > * {
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    overflow: hidden !important;
   }
 
   @page {

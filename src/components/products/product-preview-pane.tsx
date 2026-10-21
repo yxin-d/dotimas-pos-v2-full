@@ -2,8 +2,8 @@
 
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { Check, Circle, CircleCheck } from 'lucide-react'
-import { createProduct, updateProduct, type ProductPayload } from '@/src/app/(app)/products/action'
+import { Check, Circle, CircleCheck, Trash2 } from 'lucide-react'
+import { createProduct, updateProduct, deleteProducts, type ProductPayload } from '@/src/app/(app)/products/action'
 import type { Product, ProductCategory } from '@/types/database'
 
 interface Props {
@@ -12,6 +12,7 @@ interface Props {
   categories: ProductCategory[]
   prefillBarcode?: string
   onSaved: (product: Product) => void
+  onDeleted: (id: string) => void
 }
 
 const emptyForm = (barcode?: string): ProductPayload => ({
@@ -19,7 +20,7 @@ const emptyForm = (barcode?: string): ProductPayload => ({
   price: 0, cost: 0, stocks: 0, low_stock_threshold: 5, is_active: true,
 })
 
-export default function ProductPreviewPane({ mode, product, categories, prefillBarcode, onSaved }: Props) {
+export default function ProductPreviewPane({ mode, product, categories, prefillBarcode, onSaved, onDeleted }: Props) {
   const [form, setForm] = useState<ProductPayload>(() =>
     product
       ? {
@@ -30,6 +31,22 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
       : emptyForm(prefillBarcode)
   )
   const [saving, setSaving] = useState(false)
+  // Two-step delete: first click arms it, second click deletes.
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  async function handleDelete() {
+    if (!product) return
+    setDeleting(true)
+    const { error } = await deleteProducts([product.id])
+    setDeleting(false)
+    if (error) {
+      toast.error(error)
+      return
+    }
+    toast.success(`Deleted ${product.name}`)
+    onDeleted(product.id)
+  }
 
   function set<K extends keyof ProductPayload>(key: K, value: ProductPayload[K]) {
     setForm(f => ({ ...f, [key]: value }))
@@ -125,6 +142,32 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
         <Check size={16} />
         {saving ? 'Saving…' : mode === 'create' ? 'Create product' : 'Save changes'}
       </button>
+
+      {mode === 'edit' && product && (
+        confirmDelete ? (
+          <div className="rounded-xl border border-danger/30 bg-danger-soft p-3 flex flex-col gap-2">
+            <p className="text-xs text-ink-soft">
+              Delete <span className="font-bold text-ink">{product.name}</span>? Past sales and receipts keep
+              their record of it. To just hide it from the POS, mark it Inactive instead.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmDelete(false)} disabled={deleting} className="flex-1 rounded-lg border border-border bg-surface py-2 text-xs font-semibold text-ink-soft">
+                Cancel
+              </button>
+              <button onClick={handleDelete} disabled={deleting} className="flex-1 rounded-lg bg-danger py-2 text-xs font-bold text-white disabled:opacity-60">
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-ink-faint hover:text-danger py-1 transition-colors"
+          >
+            <Trash2 size={13} /> Delete product
+          </button>
+        )
+      )}
     </div>
   )
 }

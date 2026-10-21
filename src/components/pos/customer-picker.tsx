@@ -27,8 +27,8 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
     const timeout = setTimeout(async () => {
       setLoading(true)
       const req = query.trim()
-        ? supabase.from('customers').select('*').ilike('name', `%${query.trim()}%`).order('name').limit(20)
-        : supabase.from('customers').select('*').order('name').limit(20)
+        ? supabase.from('customers').select('*').is('archived_at', null).ilike('name', `%${query.trim()}%`).order('name').limit(20)
+        : supabase.from('customers').select('*').is('archived_at', null).order('name').limit(20)
 
       const { data } = await req
       if (!cancelled) {

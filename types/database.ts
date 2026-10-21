@@ -41,6 +41,7 @@ export interface Customer {
   credit_balance: number
   credit_warning_threshold: number | null
   created_at: string
+  archived_at: string | null // set = hidden from lists; see delete_customer()
 }
 
 export interface LedgerEntry {

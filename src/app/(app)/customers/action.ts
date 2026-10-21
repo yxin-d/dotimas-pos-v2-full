@@ -34,3 +34,51 @@ export async function recordCreditChange(
   revalidatePath('/customers')
   return { balance: data as number, error: null }
 }
+export interface CustomerDetails {
+  name: string
+  phone: string | null
+  credit_warning_threshold: number | null
+}
+
+export async function updateCustomer(
+  customerId: string,
+  details: CustomerDetails
+): Promise<{ error: string | null }> {
+  const name = details.name.trim()
+  if (!name) return { error: 'Name is required' }
+  const supabase = await createClient()
+  const { error } = await supabase
+    .from('customers')
+    .update({
+      name,
+      phone: details.phone?.trim() || null,
+      credit_warning_threshold: details.credit_warning_threshold,
+    })
+    .eq('id', customerId)
+  if (error) return { error: error.message }
+  revalidatePath(`/customers/${customerId}/credit`)
+  revalidatePath('/customers')
+  return { error: null }
+}
+
+// delete_customer() deletes a customer with no history, archives one that
+// has credit/sales history (so the record of who owed what survives), and
+// refuses while they still owe anything.
+export async function deleteCustomer(
+  customerId: string
+): Promise<{ result: 'deleted' | 'archived' | null; error: string | null }> {
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc('delete_customer', { p_customer_id: customerId })
+  if (error) return { result: null, error: error.message }
+  revalidatePath('/customers')
+  return { result: data as 'deleted' | 'archived', error: null }
+}
+
+export async function restoreCustomer(customerId: string): Promise<{ error: string | null }> {
+  const supabase = await createClient()
+  const { error } = await supabase.from('customers').update({ archived_at: null }).eq('id', customerId)
+  if (error) return { error: error.message }
+  revalidatePath(`/customers/${customerId}/credit`)
+  revalidatePath('/customers')
+  return { error: null }
+}

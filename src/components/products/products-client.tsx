@@ -3,11 +3,12 @@
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
-import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package } from 'lucide-react'
+import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package, Trash2 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useBarcodeScanner } from '@/hooks/use-barcode-scanner'
 import { formatPeso } from '@/lib/utils/currency'
-import { exportProducts } from '@/src/app/(app)/products/action'
+import { exportProducts, deleteProducts } from '@/src/app/(app)/products/action'
+import Modal from '@/src/components/ui/modal'
 import ProductPreviewPane from './product-preview-pane'
 import BulkEditModal from './bulk-edit-modal'
 import type { Product, ProductCategory } from '@/types/database'
@@ -28,6 +29,8 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   const [prefillBarcode, setPrefillBarcode] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkEdit, setShowBulkEdit] = useState(false)
+  const [showBulkDelete, setShowBulkDelete] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -92,6 +95,33 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
     refresh()
   }
 
+  function handleDeleted(id: string) {
+    setSelectedProduct(null)
+    setPreviewMode(null)
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    refresh()
+  }
+
+  async function handleBulkDelete() {
+    const ids = [...selectedIds]
+    setBulkDeleting(true)
+    const { deleted, error } = await deleteProducts(ids)
+    setBulkDeleting(false)
+    if (error) toast.error(`Deleted ${deleted} of ${ids.length}: ${error}`)
+    else toast.success(`Deleted ${deleted} product${deleted === 1 ? '' : 's'}`)
+    setShowBulkDelete(false)
+    setSelectedIds(new Set())
+    if (selectedProduct && ids.includes(selectedProduct.id)) {
+      setSelectedProduct(null)
+      setPreviewMode(null)
+    }
+    refresh()
+  }
+
   async function handleExport() {
     try {
       const csv = await exportProducts()
@@ -121,6 +151,14 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
           >
             <Layers size={13} /> Bulk edit{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
           </button>
+          {selectedIds.size > 0 && (
+            <button
+              onClick={() => setShowBulkDelete(true)}
+              className="flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3.5 py-2 text-xs font-bold text-danger hover:border-danger transition-colors"
+            >
+              <Trash2 size={13} /> Delete ({selectedIds.size})
+            </button>
+          )}
           <button onClick={handleExport} className="flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3.5 py-2 text-xs font-bold text-ink-soft hover:border-primary transition-colors">
             <FileDown size={13} /> Export
           </button>
@@ -211,9 +249,27 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
             categories={categories}
             prefillBarcode={prefillBarcode}
             onSaved={handleSaved}
+            onDeleted={handleDeleted}
           />
         )}
       </div>
+
+      <Modal open={showBulkDelete} onClose={() => !bulkDeleting && setShowBulkDelete(false)} title={`Delete ${selectedIds.size} product${selectedIds.size === 1 ? '' : 's'}?`}>
+        <div className="p-5 flex flex-col gap-4">
+          <p className="text-sm text-ink-soft">
+            This can&apos;t be undone. Past sales and receipts keep their record of these products. To just hide
+            them from the POS, use Bulk edit to mark them Inactive instead.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setShowBulkDelete(false)} disabled={bulkDeleting} className="flex-1 rounded-xl border border-border py-2.5 text-sm font-semibold text-ink-soft">
+              Cancel
+            </button>
+            <button onClick={handleBulkDelete} disabled={bulkDeleting} className="flex-1 rounded-xl bg-danger py-2.5 text-sm font-bold text-white disabled:opacity-60">
+              {bulkDeleting ? 'Deleting…' : `Delete ${selectedIds.size}`}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {showBulkEdit && (
         <BulkEditModal

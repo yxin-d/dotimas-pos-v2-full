@@ -70,6 +70,31 @@ export async function updateProduct(id: string, payload: ProductPayload) {
   return data
 }
 
+// ------------------- DELETE -------------------
+// Hard delete. Past sales keep their own snapshot of the product name and
+// price (sales.product_id is ON DELETE SET NULL), so receipts and reports are
+// unaffected. Errors are returned, not thrown — see the NOTE in pos/action.ts.
+export async function deleteProducts(ids: string[]): Promise<{ deleted: number; error: string | null }> {
+  if (ids.length === 0) return { deleted: 0, error: null }
+  const supabase = await createClient()
+  let deleted = 0
+  // Chunked so a large selection doesn't build an over-long request URL.
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error } = await supabase
+      .from('products')
+      .delete()
+      .in('id', ids.slice(i, i + 200))
+      .select('id')
+    if (error) {
+      revalidatePath('/products')
+      return { deleted, error: error.message }
+    }
+    deleted += data?.length ?? 0
+  }
+  revalidatePath('/products')
+  return { deleted, error: null }
+}
+
 // ------------------- BULK EDIT -------------------
 
 export interface RowEdit {
