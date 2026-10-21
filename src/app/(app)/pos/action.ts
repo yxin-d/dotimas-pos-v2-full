@@ -19,6 +19,12 @@ interface CheckoutPayload {
   isCredit: boolean
   payments: CheckoutPayment[]
   items: CheckoutItem[]
+  // Offline-ready fields (all optional). invoiceId is generated on the device
+  // so a retry of the same sale is a no-op on the server instead of a
+  // duplicate. soldAt / sessionId are for sales replayed from the offline queue.
+  invoiceId?: string
+  soldAt?: string
+  sessionId?: string
 }
 
 // NOTE on error handling: this deliberately RETURNS errors instead of
@@ -38,6 +44,9 @@ export async function completeSale(
     p_payments: payload.payments,
     p_is_credit: payload.isCredit,
     p_items: payload.items,
+    p_invoice_id: payload.invoiceId ?? null,
+    p_sold_at: payload.soldAt ?? null,
+    p_session_id: payload.sessionId ?? null,
   })
 
   if (error) return { invoiceId: null, error: error.message }

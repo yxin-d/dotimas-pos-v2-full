@@ -59,6 +59,7 @@ export const useCart = create<CartStore>((set, get) => ({
       category_id: null,
       price,
       cost: 0,
+      srp: null,
       stocks: 0,
       low_stock_threshold: 0,
       is_active: true,

@@ -35,6 +35,10 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
   const [rows, setRows] = useState<Row[]>([{ method: 'cash', amount: '' }, { method: 'gcash', amount: '' }])
   const [showPicker, setShowPicker] = useState(false)
   const [loading, setLoading] = useState(false)
+  // One id per checkout attempt. If the request times out and the cashier
+  // taps Complete again, the server sees the same id and won't record the
+  // sale twice.
+  const [invoiceId] = useState(() => crypto.randomUUID())
 
   const isCredit = mode === 'credit'
   const isMixed = mode === 'mixed'
@@ -80,19 +84,20 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
 
     setLoading(true)
     try {
-      const { invoiceId, error } = await completeSale({
+      const { invoiceId: savedId, error } = await completeSale({
         customerId: customer?.id ?? null,
         isCredit,
         payments,
         items: buildItemsPayload(),
+        invoiceId,
       })
-      if (error || !invoiceId) {
+      if (error || !savedId) {
         toast.error(error ?? 'Checkout failed')
         return
       }
       toast.success('Sale complete')
       clearCart()
-      onComplete(invoiceId)
+      onComplete(savedId)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Checkout failed')
     } finally {

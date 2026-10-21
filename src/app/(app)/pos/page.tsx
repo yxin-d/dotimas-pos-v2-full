@@ -1,22 +1,15 @@
 import { createClient } from '@/lib/supabase/server'
-import { getStaffAndShift } from '@/lib/staff'
+import { getCurrentSession } from '@/lib/session'
 import PosClient from '@/src/components/pos/pos-client'
 
 export const dynamic = 'force-dynamic'
 
 export default async function PosPage() {
   const supabase = await createClient()
-  const [{ staff, session, activeShift }, { data: categories }] = await Promise.all([
-    getStaffAndShift(),
+  const [session, { data: categories }] = await Promise.all([
+    getCurrentSession(),
     supabase.from('product_categories').select('*').order('sort_order').order('name'),
   ])
 
-  return (
-    <PosClient
-      staff={staff}
-      session={session}
-      activeShift={activeShift}
-      categories={categories ?? []}
-    />
-  )
+  return <PosClient session={session} categories={categories ?? []} />
 }

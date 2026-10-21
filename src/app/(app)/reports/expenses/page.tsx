@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
+import { manilaDate, manilaMonthStart } from '@/lib/utils/date'
 import { toast } from 'sonner'
 import {
   Plus,
@@ -58,10 +59,10 @@ export default function ExpensesPage() {
 
   // Filters
   const [dateFrom, setDateFrom] = useState(
-    new Date(new Date().setDate(1)).toISOString().slice(0, 10) // first day of current month
+    manilaMonthStart() // first day of current month (Manila)
   )
   const [dateTo, setDateTo] = useState(
-    new Date().toISOString().slice(0, 10)
+    manilaDate()
   )
   const [categoryFilter, setCategoryFilter] = useState<ExpenseCategory | 'all'>('all')
 
@@ -72,7 +73,7 @@ export default function ExpensesPage() {
     description: '',
     category: 'other' as ExpenseCategory,
     amount: '',
-    expense_date: new Date().toISOString().slice(0, 10),
+    expense_date: manilaDate(),
     notes: '',
   })
   const [submitting, setSubmitting] = useState(false)
@@ -135,7 +136,7 @@ export default function ExpensesPage() {
         description: '',
         category: 'other',
         amount: '',
-        expense_date: new Date().toISOString().slice(0, 10),
+        expense_date: manilaDate(),
         notes: '',
       })
     }

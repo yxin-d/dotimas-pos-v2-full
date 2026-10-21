@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { PowerOff } from 'lucide-react'
-import { closeDay } from '@/src/app/(app)/shift-actions'
+import { closeDay } from '@/src/app/(app)/day-actions'
 import { formatPeso } from '@/lib/utils/currency'
 
 interface CloseDayModalProps {

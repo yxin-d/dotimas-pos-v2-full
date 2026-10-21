@@ -1,4 +1,4 @@
-// Types mirror the live V2 schema (supabase/migrations/0001-0007). Keep these
+// Types mirror the live V2 schema (supabase/migrations/0001_baseline.sql). Keep these
 // in sync with the DB — if a migration changes a column, update it here too.
 
 export type PaymentMethod = 'cash' | 'gcash' | 'maya' | 'mixed' | 'credit'
@@ -7,14 +7,6 @@ export type InvoiceStatus = 'completed' | 'voided'
 export type GcashDirection = 'received' | 'sent'
 export type GcashSubmissionStatus = 'pending' | 'confirmed' | 'rejected'
 export type SessionStatus = 'open' | 'closed'
-
-export interface Staff {
-  id: string
-  name: string
-  initials: string
-  is_active: boolean
-  created_at: string
-}
 
 export interface ProductCategory {
   id: string
@@ -32,6 +24,7 @@ export interface Product {
   category_id: string | null
   price: number
   cost: number
+  srp: number | null
   stocks: number
   low_stock_threshold: number
   is_active: boolean
@@ -58,7 +51,6 @@ export interface LedgerEntry {
   amount: number
   running_balance: number
   description: string | null
-  created_by: string | null
   created_at: string
 }
 
@@ -70,26 +62,15 @@ export interface PosSession {
   closing_cash: number | null
   expected_cash: number | null
   variance: number | null
-  opened_by: string | null
   opened_at: string
-  closed_by: string | null
   closed_at: string | null
   notes: string | null
-}
-
-export interface StaffShift {
-  id: string
-  session_id: string
-  staff_id: string
-  started_at: string
-  ended_at: string | null
 }
 
 export interface SaleInvoice {
   id: string
   customer_id: string | null
-  staff_id: string | null
-  shift_id: string | null
+  session_id: string
   payment_method: PaymentMethod | null
   is_credit: boolean
   amount_received: number
@@ -97,9 +78,9 @@ export interface SaleInvoice {
   total_amount: number
   status: InvoiceStatus
   voided_at: string | null
-  voided_by: string | null
   void_reason: string | null
-  created_at: string
+  created_at: string // when the sale happened (device time for offline sales)
+  synced_at: string  // when it reached the server
 }
 
 export interface InvoicePayment {
@@ -124,8 +105,6 @@ export interface SaleLine {
 
 export interface Expense {
   id: string
-  staff_id: string | null
-  shift_id: string | null
   description: string
   category: string | null
   amount: number
@@ -142,7 +121,6 @@ export interface GcashLogEntry {
   ref_number: string | null
   notes: string | null
   txn_date: string
-  created_by: string | null
   created_at: string
 }
 
@@ -156,7 +134,6 @@ export interface GcashSubmission {
   notes: string | null
   status: GcashSubmissionStatus
   submitted_at: string
-  reviewed_by: string | null
   reviewed_at: string | null
   review_notes: string | null
 }

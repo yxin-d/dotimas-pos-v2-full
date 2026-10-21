@@ -13,7 +13,7 @@ interface Props {
 }
 
 interface ReceiptData {
-  invoice: SaleInvoice & { customers: { name: string } | null; staff: { name: string } | null }
+  invoice: SaleInvoice & { customers: { name: string } | null }
   lines: SaleLine[]
   payments: InvoicePayment[]
 }
@@ -25,17 +25,10 @@ export default function Receipt({ invoiceId, onClose }: Props) {
   useEffect(() => {
     async function load() {
       const supabase = createClient()
-      // sale_invoice has TWO foreign keys into staff — staff_id (who rang up
-      // the sale) and voided_by (who voided it) — so an unqualified
-      // "staff(name)" embed is ambiguous and PostgREST rejects the whole
-      // request (PGRST201). The !sale_invoice_staff_id_fkey hint tells it
-      // which relationship to follow. This is why the receipt used to render
-      // nothing after checkout: the query errored out and the failure was
-      // never surfaced, so it just looked like the feature had disappeared.
       const [invoiceRes, linesRes, paymentsRes] = await Promise.all([
         supabase
           .from('sale_invoice')
-          .select('*, customers(name), staff!sale_invoice_staff_id_fkey(name)')
+          .select('*, customers(name)')
           .eq('id', invoiceId)
           .single(),
         supabase.from('sales').select('*').eq('invoice_id', invoiceId),
@@ -127,12 +120,6 @@ function ReceiptContent({ invoice, lines, payments, receiptNo }: {
         <span style={{ color: '#555' }}>Date:</span>
         <span>{formatDate(invoice.created_at, true)}</span>
       </div>
-      {invoice.staff?.name && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
-          <span style={{ color: '#555' }}>Served by:</span>
-          <span>{invoice.staff.name}</span>
-        </div>
-      )}
       {invoice.customers?.name && (
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
           <span style={{ color: '#555' }}>Customer:</span>
