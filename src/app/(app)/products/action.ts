@@ -202,8 +202,42 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
     return data.id
   }
 
-  const { data: existingSkuRows } = await supabase.from('products').select('sku')
-  const usedSkus = new Set<string>((existingSkuRows || []).map(r => r.sku).filter(Boolean))
+  // Read every existing product ONCE (paged — the API returns at most 1000
+  // rows per request) and match import rows against them in memory. The old
+  // version made 2–3 database calls per row, one after another; ~800 rows
+  // took longer than Vercel's 300-second limit and the import was cut off.
+  type ExistingProduct = { id: string; sku: string | null; barcode: string | null; name: string; volume: string | null; category_id: string | null }
+  const existing: ExistingProduct[] = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from('products')
+      .select('id, sku, barcode, name, volume, category_id')
+      .order('id')
+      .range(from, from + 999)
+    if (error) {
+      return { success: false, message: `Could not read existing products: ${error.message}`, inserted: 0, updated: 0, skipped: 0, missing_price: 0, skippedRows: [], categoriesCreated }
+    }
+    existing.push(...(data ?? []))
+    if (!data || data.length < 1000) break
+  }
+
+  // Same product = same barcode, else same SKU, else same name + volume in the
+  // same category. The last rule is what stops a re-import from duplicating
+  // products that had no barcode/SKU in the file (their SKU is generated).
+  const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+  const identityKey = (categoryId: string | null, name: string, volume: string | null | undefined) =>
+    `${categoryId ?? ''}|${norm(name)}|${norm(volume)}`
+  const byBarcode = new Map<string, string>()
+  const bySku = new Map<string, string>()
+  const byIdentity = new Map<string, string>()
+  const skuOfId = new Map<string, string | null>()
+  for (const p of existing) {
+    if (p.barcode) byBarcode.set(p.barcode, p.id)
+    if (p.sku) bySku.set(p.sku, p.id)
+    byIdentity.set(identityKey(p.category_id, p.name, p.volume), p.id)
+    skuOfId.set(p.id, p.sku)
+  }
+  const usedSkus = new Set<string>(existing.map(p => p.sku).filter((s): s is string => !!s))
 
   function slug(s: string, max: number) {
     return s.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max)
@@ -222,6 +256,18 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
   const results = { inserted: 0, updated: 0, skipped: 0, missing_price: 0 }
   const skippedRows: string[] = []
 
+  type Payload = {
+    name: string; sku: string; barcode: string | null; volume: string | null; category_id: string | null
+    price: number; cost: number; stocks: number; low_stock_threshold: number; is_active: boolean
+  }
+  type Pending = { label: string; payload: Payload }
+  // Keyed so a product listed twice in the file is written once (last row wins)
+  // instead of colliding with itself on the unique barcode/SKU.
+  const toInsert = new Map<string, Pending>()
+  const toUpdate = new Map<string, Pending>() // key = existing product id
+  const newByBarcode = new Map<string, string>()
+  const newBySku = new Map<string, string>()
+
   for (const sheetName of workbook.SheetNames) {
     const rawRows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName])
     if (rawRows.length === 0) continue
@@ -230,23 +276,32 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
 
     for (const [index, rawRow] of rawRows.entries()) {
       const row = normalizeRow(rawRow)
-      const rowLabel = `[${sheetName}] Row ${index + 2}`
+      const label = `[${sheetName}] Row ${index + 2}`
 
       if (!row.name) {
         results.skipped++
-        skippedRows.push(`${rowLabel}: missing name — skipped`)
+        skippedRows.push(`${label}: missing name — skipped`)
         continue
       }
 
       const hasPrice = row.price !== undefined && row.price >= 0
       if (!hasPrice) results.missing_price++
 
-      const sku = row.sku || generateImportSku(sheetName, row.name, row.volume)
+      const barcode = row.barcode || null
+      const existingId =
+        (barcode && byBarcode.get(barcode)) ||
+        (row.sku && bySku.get(row.sku)) ||
+        byIdentity.get(identityKey(categoryId, row.name, row.volume)) ||
+        null
 
-      const productPayload = {
+      const sku = row.sku
+        || (existingId ? skuOfId.get(existingId) : null)
+        || generateImportSku(sheetName, row.name, row.volume)
+
+      const payload: Payload = {
         name: row.name,
         sku,
-        barcode: row.barcode || null,
+        barcode,
         volume: row.volume || null,
         category_id: categoryId,
         price: hasPrice ? row.price! : 0,
@@ -256,27 +311,63 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
         is_active: hasPrice ? (row.is_active ?? true) : false,
       }
 
-      let existingId: string | null = null
-      if (productPayload.barcode) {
-        const { data: existing } = await supabase.from('products').select('id').eq('barcode', productPayload.barcode).maybeSingle()
-        if (existing) existingId = existing.id
-      }
-      if (!existingId && productPayload.sku) {
-        const { data: existing } = await supabase.from('products').select('id').eq('sku', productPayload.sku).maybeSingle()
-        if (existing) existingId = existing.id
+      if (existingId) {
+        toUpdate.set(existingId, { label, payload })
+        continue
       }
 
-      if (existingId) {
-        const { error } = await supabase.from('products').update(productPayload).eq('id', existingId)
-        if (!error) results.updated++
-        else { results.skipped++; skippedRows.push(`${rowLabel}: update failed — ${error.message}`); continue }
-      } else {
-        const { error } = await supabase.from('products').insert(productPayload)
-        if (!error) results.inserted++
-        else { results.skipped++; skippedRows.push(`${rowLabel}: insert failed — ${error.message}`); continue }
+      // New product. If an earlier row in this same file already introduced
+      // it (same barcode/SKU/name+volume), merge into that one.
+      const ident = identityKey(categoryId, row.name, row.volume)
+      const key =
+        (barcode && newByBarcode.get(barcode)) ||
+        (row.sku && newBySku.get(row.sku)) ||
+        ident
+      if (barcode) newByBarcode.set(barcode, key)
+      if (row.sku) newBySku.set(row.sku, key)
+      const prev = toInsert.get(key)
+      if (prev) {
+        skippedRows.push(`${label}: duplicate of ${prev.label} in this file — merged`)
+        payload.sku = prev.payload.sku
+      }
+      toInsert.set(key, { label, payload })
+    }
+  }
+
+  // Write in chunks: one request per few hundred rows instead of per row. If a
+  // chunk is rejected (e.g. a barcode clash), retry that chunk row by row so
+  // only the bad rows are skipped and the error says which ones.
+  const CHUNK = 300
+  async function writeChunks(items: Pending[], kind: 'insert' | 'update', ids?: string[]) {
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const slice = items.slice(i, i + CHUNK)
+      const rows = slice.map((it, j) => (kind === 'update' ? { id: ids![i + j], ...it.payload } : it.payload))
+      const { error } = kind === 'update'
+        ? await supabase.from('products').upsert(rows, { onConflict: 'id' })
+        : await supabase.from('products').insert(rows)
+      if (!error) {
+        if (kind === 'update') results.updated += slice.length
+        else results.inserted += slice.length
+        continue
+      }
+      for (const [j, row] of rows.entries()) {
+        const { error: rowError } = kind === 'update'
+          ? await supabase.from('products').upsert(row, { onConflict: 'id' })
+          : await supabase.from('products').insert(row)
+        if (!rowError) {
+          if (kind === 'update') results.updated++
+          else results.inserted++
+        } else {
+          results.skipped++
+          skippedRows.push(`${slice[j].label}: ${kind} failed — ${rowError.message}`)
+        }
       }
     }
   }
+
+  const updates = [...toUpdate.entries()]
+  await writeChunks(updates.map(([, v]) => v), 'update', updates.map(([id]) => id))
+  await writeChunks([...toInsert.values()], 'insert')
 
   const messageParts = [
     `✅ Import complete: ${results.inserted} inserted, ${results.updated} updated, ${results.skipped} skipped`,
