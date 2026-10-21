@@ -1,0 +1,2160 @@
+From 62531e2d2fedcfbb114ece96341b1471797950e1 Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Wed, 21 Oct 2026 20:24:56 +0800
+Subject: [PATCH] Kiosk category grid, offline-ready schema reset, drop
+ staff/shift tracking
+
+- POS opens on a category card grid; search spans all categories; barcode
+  scans look up products not on screen
+- New consolidated baseline migration (old 0001-0009 archived) plus a
+  one-time reset script; Manila business dates; idempotent complete_sale
+  with client invoice id / sale time / session; daily_summary and
+  credit_summary views; srp restored
+- Login still gates the app, but no staff or shift tracking; day is still
+  opened with starting cash and closed with a drawer count
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ hooks/use-cart.ts                             |   1 +
+ lib/session.ts                                |  35 +
+ lib/staff.ts                                  |  45 -
+ lib/utils/date.ts                             |  22 +
+ .../{shift-actions.ts => day-actions.ts}      |  24 +-
+ src/app/(app)/pos/action.ts                   |   9 +
+ src/app/(app)/pos/page.tsx                    |  15 +-
+ src/app/(app)/reports/expenses/page.tsx       |   9 +-
+ src/components/pos/category-grid.tsx          | 111 +++
+ src/components/pos/checkout-modal.tsx         |  11 +-
+ src/components/pos/close-day-modal.tsx        |   2 +-
+ src/components/pos/open-day-modal.tsx         |  83 ++
+ src/components/pos/pos-client.tsx             | 238 ++++--
+ src/components/pos/receipt.tsx                |  17 +-
+ src/components/pos/shift-modal.tsx            | 114 ---
+ supabase/migrations/0001_baseline.sql         | 782 ++++++++++++++++++
+ .../0001_enums_and_core_reference_tables.sql  |   0
+ .../0002_shifts_sales_and_ledger.sql          |   0
+ .../0003_gcash.sql                            |   0
+ .../0004_functions.sql                        |   0
+ .../0005_rls.sql                              |   0
+ .../0006_function_permissions.sql             |   0
+ .../0007_lock_down_trigger_functions.sql      |   0
+ .../0008_grant_table_privileges.sql           |   0
+ .../0009_allow_inactive_product_sales.sql     |   0
+ supabase/reset/reset_public_schema.sql        |  68 ++
+ types/database.ts                             |  33 +-
+ 27 files changed, 1298 insertions(+), 321 deletions(-)
+ create mode 100644 lib/session.ts
+ delete mode 100644 lib/staff.ts
+ create mode 100644 lib/utils/date.ts
+ rename src/app/(app)/{shift-actions.ts => day-actions.ts} (55%)
+ create mode 100644 src/components/pos/category-grid.tsx
+ create mode 100644 src/components/pos/open-day-modal.tsx
+ delete mode 100644 src/components/pos/shift-modal.tsx
+ create mode 100644 supabase/migrations/0001_baseline.sql
+ rename supabase/{migrations => migrations_archive}/0001_enums_and_core_reference_tables.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0002_shifts_sales_and_ledger.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0003_gcash.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0004_functions.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0005_rls.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0006_function_permissions.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0007_lock_down_trigger_functions.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0008_grant_table_privileges.sql (100%)
+ rename supabase/{migrations => migrations_archive}/0009_allow_inactive_product_sales.sql (100%)
+ create mode 100644 supabase/reset/reset_public_schema.sql
+
+diff --git a/hooks/use-cart.ts b/hooks/use-cart.ts
+index c891165..d2123d2 100644
+--- a/hooks/use-cart.ts
++++ b/hooks/use-cart.ts
+@@ -59,6 +59,7 @@ export const useCart = create<CartStore>((set, get) => ({
+       category_id: null,
+       price,
+       cost: 0,
++      srp: null,
+       stocks: 0,
+       low_stock_threshold: 0,
+       is_active: true,
+diff --git a/lib/session.ts b/lib/session.ts
+new file mode 100644
+index 0000000..01b2eff
+--- /dev/null
++++ b/lib/session.ts
+@@ -0,0 +1,35 @@
++import { createClient } from '@/lib/supabase/server'
++import { manilaDate } from '@/lib/utils/date'
++import type { PosSession } from '@/types/database'
++
++/**
++ * The business day the POS should be working in.
++ *
++ * - If a day is still open, that's the one — even if it was opened on an
++ *   earlier date and never closed. Its drawer hasn't been counted yet, so
++ *   sales keep going into it until someone closes it.
++ * - Otherwise today's day (Manila time), which may already be closed.
++ * - null when today hasn't been opened yet.
++ *
++ * There's no staff/shift tracking: the login only proves the person is
++ * allowed to use the system.
++ */
++export async function getCurrentSession(): Promise<PosSession | null> {
++  const supabase = await createClient()
++
++  const { data: open } = await supabase
++    .from('pos_sessions')
++    .select('*')
++    .eq('status', 'open')
++    .order('session_date', { ascending: false })
++    .limit(1)
++    .maybeSingle()
++  if (open) return open
++
++  const { data: today } = await supabase
++    .from('pos_sessions')
++    .select('*')
++    .eq('session_date', manilaDate())
++    .maybeSingle()
++  return today ?? null
++}
+diff --git a/lib/staff.ts b/lib/staff.ts
+deleted file mode 100644
+index 3ff806b..0000000
+--- a/lib/staff.ts
++++ /dev/null
+@@ -1,45 +0,0 @@
+-import { createClient } from '@/lib/supabase/server'
+-import type { Staff, PosSession, StaffShift } from '@/types/database'
+-
+-export interface StaffAndShift {
+-  staff: Staff | null
+-  session: PosSession | null
+-  activeShift: StaffShift | null
+-}
+-
+-/**
+- * Resolves the currently logged-in staff member, today's pos_session (if any),
+- * and their own active shift row (if any). Used by any page that needs to
+- * show "who's logged in" or gate an action behind "shift must be open."
+- *
+- * A staff member can have MORE than one shift row per day (they can leave and
+- * come back — see staff_shifts in the schema) so "active" specifically means
+- * ended_at is null, not just "worked today."
+- */
+-export async function getStaffAndShift(): Promise<StaffAndShift> {
+-  const supabase = await createClient()
+-
+-  const { data: { user } } = await supabase.auth.getUser()
+-  if (!user) {
+-    return { staff: null, session: null, activeShift: null }
+-  }
+-
+-  const [{ data: staff }, { data: session }] = await Promise.all([
+-    supabase.from('staff').select('*').eq('id', user.id).single(),
+-    supabase.from('pos_sessions').select('*').eq('session_date', new Date().toISOString().slice(0, 10)).maybeSingle(),
+-  ])
+-
+-  let activeShift: StaffShift | null = null
+-  if (session) {
+-    const { data } = await supabase
+-      .from('staff_shifts')
+-      .select('*')
+-      .eq('session_id', session.id)
+-      .eq('staff_id', user.id)
+-      .is('ended_at', null)
+-      .maybeSingle()
+-    activeShift = data ?? null
+-  }
+-
+-  return { staff: staff ?? null, session: session ?? null, activeShift }
+-}
+diff --git a/lib/utils/date.ts b/lib/utils/date.ts
+new file mode 100644
+index 0000000..4e5385e
+--- /dev/null
++++ b/lib/utils/date.ts
+@@ -0,0 +1,22 @@
++// The store runs on Manila time, but `new Date().toISOString()` is UTC — so
++// between 00:00 and 08:00 Manila it returns *yesterday's* date. Always use
++// these helpers for "what day is it" logic. Mirrors public.business_date() in
++// the database.
++
++const MANILA = 'Asia/Manila'
++
++/** YYYY-MM-DD for the given moment in Manila (defaults to now). */
++export function manilaDate(d: Date = new Date()): string {
++  // en-CA formats as YYYY-MM-DD
++  return new Intl.DateTimeFormat('en-CA', {
++    timeZone: MANILA,
++    year: 'numeric',
++    month: '2-digit',
++    day: '2-digit',
++  }).format(d)
++}
++
++/** YYYY-MM-01 for the current Manila month. */
++export function manilaMonthStart(d: Date = new Date()): string {
++  return `${manilaDate(d).slice(0, 7)}-01`
++}
+diff --git a/src/app/(app)/shift-actions.ts b/src/app/(app)/day-actions.ts
+similarity index 55%
+rename from src/app/(app)/shift-actions.ts
+rename to src/app/(app)/day-actions.ts
+index 7e06937..af66b73 100644
+--- a/src/app/(app)/shift-actions.ts
++++ b/src/app/(app)/day-actions.ts
+@@ -6,22 +6,25 @@ import { revalidatePath } from 'next/cache'
+ // See the NOTE in pos/action.ts — returning { error } instead of throwing so
+ // the real message survives Next's production redaction of thrown Server
+ // Action errors.
+-export async function startShift(
+-  startingCash?: number
+-): Promise<{ data: { session_id: string; shift_id: string; mode: string } | null; error: string | null }> {
++export async function openDay(
++  startingCash: number
++): Promise<{ data: { session_id: string; mode: string } | null; error: string | null }> {
+   const supabase = await createClient()
+-  const { data, error } = await supabase.rpc('start_shift', {
+-    p_starting_cash: startingCash ?? null,
++  const { data, error } = await supabase.rpc('open_day', {
++    p_starting_cash: startingCash,
+   })
+   if (error) return { data: null, error: error.message }
+   revalidatePath('/', 'layout')
+-  return { data: data as { session_id: string; shift_id: string; mode: string }, error: null }
++  return { data: data as { session_id: string; mode: string }, error: null }
+ }
+ 
+ export async function closeDay(
+   closingCash: number,
+   notes?: string
+-): Promise<{ data: { expected_cash: number; variance: number; closing_cash: number } | null; error: string | null }> {
++): Promise<{
++  data: { session_date: string; expected_cash: number; variance: number; closing_cash: number } | null
++  error: string | null
++}> {
+   const supabase = await createClient()
+   const { data, error } = await supabase.rpc('close_day', {
+     p_closing_cash: closingCash,
+@@ -29,5 +32,8 @@ export async function closeDay(
+   })
+   if (error) return { data: null, error: error.message }
+   revalidatePath('/', 'layout')
+-  return { data: data as { expected_cash: number; variance: number; closing_cash: number }, error: null }
+-}
+\ No newline at end of file
++  return {
++    data: data as { session_date: string; expected_cash: number; variance: number; closing_cash: number },
++    error: null,
++  }
++}
+diff --git a/src/app/(app)/pos/action.ts b/src/app/(app)/pos/action.ts
+index 87fd711..b557974 100644
+--- a/src/app/(app)/pos/action.ts
++++ b/src/app/(app)/pos/action.ts
+@@ -19,6 +19,12 @@ interface CheckoutPayload {
+   isCredit: boolean
+   payments: CheckoutPayment[]
+   items: CheckoutItem[]
++  // Offline-ready fields (all optional). invoiceId is generated on the device
++  // so a retry of the same sale is a no-op on the server instead of a
++  // duplicate. soldAt / sessionId are for sales replayed from the offline queue.
++  invoiceId?: string
++  soldAt?: string
++  sessionId?: string
+ }
+ 
+ // NOTE on error handling: this deliberately RETURNS errors instead of
+@@ -38,6 +44,9 @@ export async function completeSale(
+     p_payments: payload.payments,
+     p_is_credit: payload.isCredit,
+     p_items: payload.items,
++    p_invoice_id: payload.invoiceId ?? null,
++    p_sold_at: payload.soldAt ?? null,
++    p_session_id: payload.sessionId ?? null,
+   })
+ 
+   if (error) return { invoiceId: null, error: error.message }
+diff --git a/src/app/(app)/pos/page.tsx b/src/app/(app)/pos/page.tsx
+index 5ed23af..ca7255a 100644
+--- a/src/app/(app)/pos/page.tsx
++++ b/src/app/(app)/pos/page.tsx
+@@ -1,22 +1,15 @@
+ import { createClient } from '@/lib/supabase/server'
+-import { getStaffAndShift } from '@/lib/staff'
++import { getCurrentSession } from '@/lib/session'
+ import PosClient from '@/src/components/pos/pos-client'
+ 
+ export const dynamic = 'force-dynamic'
+ 
+ export default async function PosPage() {
+   const supabase = await createClient()
+-  const [{ staff, session, activeShift }, { data: categories }] = await Promise.all([
+-    getStaffAndShift(),
++  const [session, { data: categories }] = await Promise.all([
++    getCurrentSession(),
+     supabase.from('product_categories').select('*').order('sort_order').order('name'),
+   ])
+ 
+-  return (
+-    <PosClient
+-      staff={staff}
+-      session={session}
+-      activeShift={activeShift}
+-      categories={categories ?? []}
+-    />
+-  )
++  return <PosClient session={session} categories={categories ?? []} />
+ }
+diff --git a/src/app/(app)/reports/expenses/page.tsx b/src/app/(app)/reports/expenses/page.tsx
+index deff34d..e9ed4ab 100644
+--- a/src/app/(app)/reports/expenses/page.tsx
++++ b/src/app/(app)/reports/expenses/page.tsx
+@@ -3,6 +3,7 @@
+ import { useEffect, useRef, useState } from 'react'
+ import { createClient } from '@/lib/supabase/client'
+ import { formatPeso, formatDate } from '@/lib/utils/currency'
++import { manilaDate, manilaMonthStart } from '@/lib/utils/date'
+ import { toast } from 'sonner'
+ import {
+   Plus,
+@@ -58,10 +59,10 @@ export default function ExpensesPage() {
+ 
+   // Filters
+   const [dateFrom, setDateFrom] = useState(
+-    new Date(new Date().setDate(1)).toISOString().slice(0, 10) // first day of current month
++    manilaMonthStart() // first day of current month (Manila)
+   )
+   const [dateTo, setDateTo] = useState(
+-    new Date().toISOString().slice(0, 10)
++    manilaDate()
+   )
+   const [categoryFilter, setCategoryFilter] = useState<ExpenseCategory | 'all'>('all')
+ 
+@@ -72,7 +73,7 @@ export default function ExpensesPage() {
+     description: '',
+     category: 'other' as ExpenseCategory,
+     amount: '',
+-    expense_date: new Date().toISOString().slice(0, 10),
++    expense_date: manilaDate(),
+     notes: '',
+   })
+   const [submitting, setSubmitting] = useState(false)
+@@ -135,7 +136,7 @@ export default function ExpensesPage() {
+         description: '',
+         category: 'other',
+         amount: '',
+-        expense_date: new Date().toISOString().slice(0, 10),
++        expense_date: manilaDate(),
+         notes: '',
+       })
+     }
+diff --git a/src/components/pos/category-grid.tsx b/src/components/pos/category-grid.tsx
+new file mode 100644
+index 0000000..39b3f74
+--- /dev/null
++++ b/src/components/pos/category-grid.tsx
+@@ -0,0 +1,111 @@
++'use client'
++
++import type { ComponentType } from 'react'
++import {
++  Coffee, Soup, Cookie, Milk, Candy, SprayCan, Shirt, Wheat, Droplets, Fish,
++  Apple, Sandwich, IceCreamCone, Pill, Package, LayoutGrid, FolderOpen,
++} from 'lucide-react'
++import type { ProductCategory } from '@/types/database'
++
++// Sentinel selections for the two tiles that aren't real categories.
++export const ALL_PRODUCTS = '__all__'
++export const UNCATEGORIZED = '__none__'
++
++interface Props {
++  categories: ProductCategory[]
++  // category id -> number of products. null while the counts are still loading.
++  counts: Record<string, number> | null
++  uncategorizedCount: number
++  totalCount: number
++  onSelect: (selection: string) => void
++}
++
++type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
++
++// Purely decorative: pick an icon from the category name so the grid is
++// quicker to scan at a glance. Anything unrecognised falls back to a box.
++const ICON_RULES: Array<[RegExp, Icon]> = [
++  [/bever|drink|juice|soda|water|coffee|tea/i, Coffee],
++  [/can|soup|noodle|instant/i, Soup],
++  [/biscuit|cookie|cracker|snack|chip/i, Cookie],
++  [/milk|dairy|cream|cheese/i, Milk],
++  [/candy|sweet|chocolate|gum/i, Candy],
++  [/clean|soap|detergent|laundry|hygiene|toilet|care/i, SprayCan],
++  [/cloth|apparel|shirt/i, Shirt],
++  [/rice|grain|flour|bread|bakery/i, Wheat],
++  [/sauce|condiment|oil|vinegar|spice|season/i, Droplets],
++  [/fish|meat|frozen|seafood/i, Fish],
++  [/fruit|veg|fresh|produce/i, Apple],
++  [/meal|food|eatery|canteen|sandwich|ulam/i, Sandwich],
++  [/ice|dessert/i, IceCreamCone],
++  [/med|pharma|health|vitamin/i, Pill],
++]
++
++function iconFor(name: string): Icon {
++  for (const [pattern, icon] of ICON_RULES) if (pattern.test(name)) return icon
++  return Package
++}
++
++export default function CategoryGrid({ categories, counts, uncategorizedCount, totalCount, onSelect }: Props) {
++  return (
++    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
++      {categories.map(cat => (
++        <CategoryCard
++          key={cat.id}
++          label={cat.name}
++          icon={iconFor(cat.name)}
++          count={counts ? (counts[cat.id] ?? 0) : null}
++          onClick={() => onSelect(cat.id)}
++        />
++      ))}
++      {uncategorizedCount > 0 && (
++        <CategoryCard
++          label="Uncategorized"
++          icon={FolderOpen}
++          count={uncategorizedCount}
++          onClick={() => onSelect(UNCATEGORIZED)}
++        />
++      )}
++      <CategoryCard
++        label="All products"
++        icon={LayoutGrid}
++        count={counts ? totalCount : null}
++        muted
++        onClick={() => onSelect(ALL_PRODUCTS)}
++      />
++    </div>
++  )
++}
++
++function CategoryCard({
++  label,
++  icon: IconComp,
++  count,
++  muted,
++  onClick,
++}: {
++  label: string
++  icon: Icon
++  count: number | null
++  muted?: boolean
++  onClick: () => void
++}) {
++  return (
++    <button
++      onClick={onClick}
++      className={`flex flex-col items-start justify-between gap-4 min-h-32 p-4 rounded-2xl border text-left cursor-pointer transition-all hover:border-primary hover:shadow-sm active:scale-95 ${
++        muted ? 'bg-surface-sunken border-border border-dashed' : 'bg-surface border-border'
++      }`}
++    >
++      <div className="w-11 h-11 bg-primary-soft rounded-xl flex items-center justify-center">
++        <IconComp size={22} className="text-primary" strokeWidth={1.5} />
++      </div>
++      <div className="min-w-0 w-full">
++        <span className="block text-base font-bold text-ink leading-tight line-clamp-2">{label}</span>
++        <span className="block text-xs text-ink-faint mt-0.5 tabular">
++          {count === null ? ' ' : `${count} item${count === 1 ? '' : 's'}`}
++        </span>
++      </div>
++    </button>
++  )
++}
+diff --git a/src/components/pos/checkout-modal.tsx b/src/components/pos/checkout-modal.tsx
+index fe6fc67..2b17fb8 100644
+--- a/src/components/pos/checkout-modal.tsx
++++ b/src/components/pos/checkout-modal.tsx
+@@ -35,6 +35,10 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
+   const [rows, setRows] = useState<Row[]>([{ method: 'cash', amount: '' }, { method: 'gcash', amount: '' }])
+   const [showPicker, setShowPicker] = useState(false)
+   const [loading, setLoading] = useState(false)
++  // One id per checkout attempt. If the request times out and the cashier
++  // taps Complete again, the server sees the same id and won't record the
++  // sale twice.
++  const [invoiceId] = useState(() => crypto.randomUUID())
+ 
+   const isCredit = mode === 'credit'
+   const isMixed = mode === 'mixed'
+@@ -80,19 +84,20 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
+ 
+     setLoading(true)
+     try {
+-      const { invoiceId, error } = await completeSale({
++      const { invoiceId: savedId, error } = await completeSale({
+         customerId: customer?.id ?? null,
+         isCredit,
+         payments,
+         items: buildItemsPayload(),
++        invoiceId,
+       })
+-      if (error || !invoiceId) {
++      if (error || !savedId) {
+         toast.error(error ?? 'Checkout failed')
+         return
+       }
+       toast.success('Sale complete')
+       clearCart()
+-      onComplete(invoiceId)
++      onComplete(savedId)
+     } catch (err) {
+       toast.error(err instanceof Error ? err.message : 'Checkout failed')
+     } finally {
+diff --git a/src/components/pos/close-day-modal.tsx b/src/components/pos/close-day-modal.tsx
+index b7807aa..339fd66 100644
+--- a/src/components/pos/close-day-modal.tsx
++++ b/src/components/pos/close-day-modal.tsx
+@@ -3,7 +3,7 @@
+ import { useState } from 'react'
+ import { toast } from 'sonner'
+ import { PowerOff } from 'lucide-react'
+-import { closeDay } from '@/src/app/(app)/shift-actions'
++import { closeDay } from '@/src/app/(app)/day-actions'
+ import { formatPeso } from '@/lib/utils/currency'
+ 
+ interface CloseDayModalProps {
+diff --git a/src/components/pos/open-day-modal.tsx b/src/components/pos/open-day-modal.tsx
+new file mode 100644
+index 0000000..1f961f0
+--- /dev/null
++++ b/src/components/pos/open-day-modal.tsx
+@@ -0,0 +1,83 @@
++'use client'
++
++import { useState } from 'react'
++import { toast } from 'sonner'
++import { Wallet } from 'lucide-react'
++import { openDay } from '@/src/app/(app)/day-actions'
++
++interface OpenDayModalProps {
++  onDone: () => void
++  onDismiss?: () => void
++}
++
++export default function OpenDayModal({ onDone, onDismiss }: OpenDayModalProps) {
++  const [cash, setCash] = useState('')
++  const [loading, setLoading] = useState(false)
++
++  async function handleSubmit() {
++    const amount = parseFloat(cash)
++    if (isNaN(amount) || amount < 0) {
++      toast.error('Enter a valid starting cash amount')
++      return
++    }
++    setLoading(true)
++    try {
++      const { error } = await openDay(amount)
++      if (error) {
++        toast.error(error)
++        return
++      }
++      toast.success('Day started')
++      onDone()
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : 'Could not start the day')
++    } finally {
++      setLoading(false)
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
++      <div className="w-full max-w-sm bg-surface rounded-2xl border border-border p-6 flex flex-col gap-4">
++        <div className="flex items-center gap-3">
++          <div className="w-10 h-10 rounded-full bg-primary-soft text-primary-dark flex items-center justify-center">
++            <Wallet size={18} />
++          </div>
++          <h2 className="font-bold text-ink">Start the day</h2>
++        </div>
++
++        <div className="flex flex-col gap-1.5">
++          <label className="text-xs font-semibold text-ink-soft">Starting cash in the drawer</label>
++          <input
++            type="number"
++            inputMode="decimal"
++            autoFocus
++            value={cash}
++            onChange={(e) => setCash(e.target.value)}
++            onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit() }}
++            placeholder="0.00"
++            className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-lg font-bold text-ink outline-none focus-visible:border-primary"
++          />
++        </div>
++
++        <button
++          onClick={handleSubmit}
++          disabled={loading}
++          className="w-full rounded-xl bg-primary text-white font-bold py-3 disabled:opacity-60"
++        >
++          {loading ? 'Starting…' : 'Open the day'}
++        </button>
++
++        {onDismiss && (
++          <button
++            onClick={onDismiss}
++            disabled={loading}
++            className="w-full text-center text-xs font-semibold text-ink-faint hover:text-ink-soft py-1 disabled:opacity-60"
++          >
++            I&apos;ll open the day later
++          </button>
++        )}
++      </div>
++    </div>
++  )
++}
+diff --git a/src/components/pos/pos-client.tsx b/src/components/pos/pos-client.tsx
+index 0117ac1..53ec39f 100644
+--- a/src/components/pos/pos-client.tsx
++++ b/src/components/pos/pos-client.tsx
+@@ -12,28 +12,36 @@ import CustomItemModal from './custom-item-modal'
+ import VoidModal from './void-modal'
+ import PriceCheckerModal from './price-checker-modal'
+ import CloseDayModal from './close-day-modal'
+-import ShiftModal from './shift-modal'
++import OpenDayModal from './open-day-modal'
+ import Receipt from './receipt'
+-import { formatPeso } from '@/lib/utils/currency'
+-import { Search, PowerOff, Scan, Ban, User, Menu, EyeOff, Lock, Receipt as ReceiptIcon } from 'lucide-react'
++import { formatPeso, formatDate } from '@/lib/utils/currency'
++import { manilaDate } from '@/lib/utils/date'
++import CategoryGrid, { ALL_PRODUCTS, UNCATEGORIZED } from './category-grid'
++import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Receipt as ReceiptIcon } from 'lucide-react'
+ import { toast } from 'sonner'
+ import PosNavDrawer from './pos-nav-drawer'
+-import type { Product, ProductCategory, Staff, PosSession, StaffShift } from '@/types/database'
++import type { Product, ProductCategory, PosSession } from '@/types/database'
+ 
+ type ActiveModal = 'checkout' | 'customItem' | 'void' | 'priceChecker' | 'closeDay' | null
+ 
+ interface Props {
+-  staff: Staff | null
++  // The day the POS is working in — see getCurrentSession(). No staff/shift
++  // tracking: being logged in is enough to sell once the day is open.
+   session: PosSession | null
+-  activeShift: StaffShift | null
+   categories: ProductCategory[]
+ }
+ 
+-export default function PosClient({ staff, session, activeShift, categories }: Props) {
++export default function PosClient({ session, categories }: Props) {
+   const router = useRouter()
+   const [products, setProducts] = useState<Product[]>([])
++  // null = category screen (kiosk-style landing). Otherwise a category id,
++  // or one of the ALL_PRODUCTS / UNCATEGORIZED sentinels.
+   const [activeCategory, setActiveCategory] = useState<string | null>(null)
++  const [categoryCounts, setCategoryCounts] = useState<Record<string, number> | null>(null)
++  const [uncategorizedCount, setUncategorizedCount] = useState(0)
++  const [totalCount, setTotalCount] = useState(0)
+   const [search, setSearch] = useState('')
++  const searching = search.trim().length > 0
+   const [showInactive, setShowInactive] = useState(false)
+   const [loading, setLoading] = useState(true)
+   const [activeModal, setActiveModal] = useState<ActiveModal>(null)
+@@ -71,9 +79,40 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+     supabaseRef.current = createClient()
+   }, [])
+ 
++  // Per-category product counts for the category cards. One light query
++  // (category_id only) rather than a count per category.
++  useEffect(() => {
++    async function loadCounts() {
++      if (!supabaseRef.current) return
++      let query = supabaseRef.current.from('products').select('category_id')
++      if (!showInactive) query = query.eq('is_active', true)
++      const { data, error } = await query
++      if (error) {
++        console.error(error)
++        return
++      }
++      const next: Record<string, number> = {}
++      let none = 0
++      for (const row of data ?? []) {
++        if (row.category_id) next[row.category_id] = (next[row.category_id] ?? 0) + 1
++        else none += 1
++      }
++      setCategoryCounts(next)
++      setUncategorizedCount(none)
++      setTotalCount((data ?? []).length)
++    }
++    loadCounts()
++  }, [showInactive])
++
+   useEffect(() => {
+     async function load() {
+       if (!supabaseRef.current) return
++      // On the category screen with nothing typed there is nothing to list.
++      if (!searching && activeCategory === null) {
++        setProducts([])
++        setLoading(false)
++        return
++      }
+       setLoading(true)
+       let query = supabaseRef.current
+         .from('products')
+@@ -81,8 +120,14 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+         .order('name')
+ 
+       if (!showInactive) query = query.eq('is_active', true)
+-      if (activeCategory) query = query.eq('category_id', activeCategory)
+-      if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%`)
++      if (searching) {
++        // Searching always spans every category, whatever screen you're on.
++        query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%`)
++      } else if (activeCategory === UNCATEGORIZED) {
++        query = query.is('category_id', null)
++      } else if (activeCategory !== ALL_PRODUCTS) {
++        query = query.eq('category_id', activeCategory)
++      }
+ 
+       const { data, error } = await query
+       if (error) {
+@@ -92,20 +137,29 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+       }
+       setLoading(false)
+     }
+-    const t = setTimeout(load, search ? 250 : 0)
++    const t = setTimeout(load, searching ? 250 : 0)
+     return () => clearTimeout(t)
+-  }, [activeCategory, search, showInactive])
++  }, [activeCategory, search, searching, showInactive])
+ 
+-  // Barcode scanner: exact match on barcode adds straight to cart
+-  const handleScan = useCallback((barcode: string) => {
+-    const match = products.find(p => p.barcode === barcode)
++  // Barcode scanner: exact match on barcode adds straight to cart. The
++  // category screen doesn't keep a product list loaded, so a scan that isn't
++  // in the visible list is looked up directly instead of failing.
++  const handleScan = useCallback(async (barcode: string) => {
++    let match: Product | null | undefined = products.find(p => p.barcode === barcode)
++    if (!match && supabaseRef.current) {
++      let query = supabaseRef.current.from('products').select('*').eq('barcode', barcode)
++      if (!showInactive) query = query.eq('is_active', true)
++      const { data, error } = await query.limit(1).maybeSingle()
++      if (error) console.error(error)
++      match = data as Product | null
++    }
+     if (match) {
+       addItem(match)
+       toast.success(`Added ${match.name}`)
+     } else {
+       toast.error(`No product with barcode ${barcode}`)
+     }
+-  }, [products, addItem])
++  }, [products, addItem, showInactive])
+   useBarcodeScanner(handleScan)
+ 
+   // F2 shortcut for the custom-item quick-add
+@@ -120,31 +174,31 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+     return () => window.removeEventListener('keydown', onKey)
+   }, [])
+ 
+-  // "needsShift" covers two very different situations that used to be
+-  // treated the same: (1) the day/shift genuinely needs opening — actionable
+-  // — vs (2) today's day has already been closed, which the close_day/
+-  // start_shift RPCs treat as final for the rest of the calendar day (see
+-  // "Today's day has already been closed" in start_shift). Previously, right
+-  // after closing the day, this would immediately re-show the ShiftModal in
+-  // "open_day" mode — a modal that could never actually succeed, since a
+-  // session already exists for today. Now a closed day gets its own locked
+-  // state instead of a modal that's doomed to fail.
+-  const needsShift = !activeShift
++  // Sales are locked until a day is open. Two locked states:
++  // (1) today hasn't been opened yet — actionable, show the OpenDayModal;
++  // (2) today's day was already closed — final for the rest of the date, so
++  //     no modal (open_day would just refuse), only a locked overlay.
++  const dayOpen = session?.status === 'open'
+   const dayClosed = session?.status === 'closed'
+-  const shiftMode = session && session.status === 'open' ? 'start_shift' : 'open_day'
++  // An open day from an earlier date means nobody closed it. Sales still go
++  // into it (its drawer hasn't been counted), but nag to close it.
++  const staleDay = dayOpen && session.session_date < manilaDate()
++
++  const categoryTitle =
++    activeCategory === ALL_PRODUCTS ? 'All products'
++    : activeCategory === UNCATEGORIZED ? 'Uncategorized'
++    : categories.find(c => c.id === activeCategory)?.name ?? ''
+ 
+-  // Reset the dismissal whenever the underlying session/shift identity
+-  // changes (day closed and reopened tomorrow, shift started elsewhere,
+-  // etc.) so a stale dismissal doesn't carry over. Adjusting state directly
+-  // during render (guarded by comparing against the last-seen key) is the
+-  // pattern React recommends for "reset this when that identity changes" —
+-  // it avoids the extra render pass a useEffect here would cause.
+-  const shiftKey = `${session?.id ?? 'none'}:${activeShift?.id ?? 'none'}`
+-  const [shiftPromptDismissed, setShiftPromptDismissed] = useState(false)
+-  const [lastShiftKey, setLastShiftKey] = useState(shiftKey)
+-  if (shiftKey !== lastShiftKey) {
+-    setLastShiftKey(shiftKey)
+-    setShiftPromptDismissed(false)
++  // "I'll open the day later" — resets whenever the session changes (e.g.
++  // the day gets opened from another device). Adjusting state during render,
++  // guarded by the last-seen key, is React's recommended pattern for "reset
++  // this when that identity changes" and avoids an extra effect pass.
++  const sessionKey = session ? `${session.id}:${session.status}` : 'none'
++  const [openPromptDismissed, setOpenPromptDismissed] = useState(false)
++  const [lastSessionKey, setLastSessionKey] = useState(sessionKey)
++  if (sessionKey !== lastSessionKey) {
++    setLastSessionKey(sessionKey)
++    setOpenPromptDismissed(false)
+   }
+ 
+   return (
+@@ -167,12 +221,6 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+           <span className="text-xs text-ink-faint hidden sm:block">
+             {new Date().toLocaleDateString('en-PH', { weekday: 'long', month: 'short', day: 'numeric' })}
+           </span>
+-          {staff && (
+-            <div className="flex items-center gap-1.5 text-xs font-semibold text-ink-soft">
+-              <User size={13} />
+-              {staff.name}
+-            </div>
+-          )}
+           {lastInvoiceId && (
+             <button
+               onClick={() => setReceiptId(lastInvoiceId)}
+@@ -208,7 +256,7 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+           >
+             <Ban size={16} />
+           </button>
+-          {activeShift && (
++          {dayOpen && (
+             <button
+               onClick={() => setActiveModal('closeDay')}
+               title="Close day"
+@@ -247,18 +295,49 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+             </button>
+           </div>
+ 
+-          {/* Category pills */}
+-          {categories.length > 0 && (
+-            <div className="flex gap-1.5 px-4 py-2 border-b border-border overflow-x-auto shrink-0">
+-              <CategoryTab label="All" active={activeCategory === null} onClick={() => setActiveCategory(null)} />
+-              {categories.map(cat => (
+-                <CategoryTab key={cat.id} label={cat.name} active={activeCategory === cat.id} onClick={() => setActiveCategory(cat.id)} />
+-              ))}
++          {staleDay && (
++            <div className="flex items-center gap-2 px-4 py-2 bg-warning-soft border-b border-border text-xs text-ink-soft shrink-0">
++              <AlertTriangle size={14} className="text-warning shrink-0" />
++              <span className="flex-1">
++                {formatDate(session.session_date)} was never closed. Sales are still going into that day.
++              </span>
++              <button
++                onClick={() => setActiveModal('closeDay')}
++                className="font-semibold text-ink underline underline-offset-2"
++              >
++                Close it
++              </button>
++            </div>
++          )}
++
++          {/* Context bar: back to categories + where you are */}
++          {(searching || activeCategory !== null) && (
++            <div className="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
++              <button
++                onClick={() => { setSearch(''); setActiveCategory(null) }}
++                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface text-xs font-semibold text-ink-soft hover:border-primary hover:text-primary transition-colors"
++              >
++                <ArrowLeft size={14} />
++                Categories
++              </button>
++              <span className="text-sm font-bold text-ink truncate">
++                {searching ? `Results for “${search.trim()}”` : categoryTitle}
++              </span>
+             </div>
+           )}
+ 
+           <div className="flex-1 overflow-y-auto p-4">
+-            <ProductGrid products={products} loading={loading} onAdd={addItem} />
++            {!searching && activeCategory === null ? (
++              <CategoryGrid
++                categories={categories}
++                counts={categoryCounts}
++                uncategorizedCount={uncategorizedCount}
++                totalCount={totalCount}
++                onSelect={setActiveCategory}
++              />
++            ) : (
++              <ProductGrid products={products} loading={loading} onAdd={addItem} />
++            )}
+           </div>
+         </div>
+ 
+@@ -278,11 +357,10 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+           onMobileClose={() => setMobileCartOpen(false)}
+         />
+ 
+-        {needsShift && staff && (dayClosed || shiftPromptDismissed) && (
+-          <ShiftLockedOverlay
++        {!dayOpen && (dayClosed || openPromptDismissed) && (
++          <DayLockedOverlay
+             dayClosed={dayClosed}
+-            mode={shiftMode}
+-            onOpen={dayClosed ? undefined : () => setShiftPromptDismissed(false)}
++            onOpen={dayClosed ? undefined : () => setOpenPromptDismissed(false)}
+           />
+         )}
+       </div>
+@@ -310,44 +388,26 @@ export default function PosClient({ staff, session, activeShift, categories }: P
+       {receiptId && <Receipt invoiceId={receiptId} onClose={() => setReceiptId(null)} />}
+       {navOpen && <PosNavDrawer onClose={() => setNavOpen(false)} />}
+ 
+-      {needsShift && staff && !dayClosed && !shiftPromptDismissed && (
+-        <ShiftModal
+-          mode={shiftMode}
+-          staffName={staff.name}
++      {!dayOpen && !dayClosed && !openPromptDismissed && (
++        <OpenDayModal
+           onDone={() => router.refresh()}
+-          onDismiss={() => setShiftPromptDismissed(true)}
++          onDismiss={() => setOpenPromptDismissed(true)}
+         />
+       )}
+     </div>
+   )
+ }
+ 
+-function CategoryTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+-  return (
+-    <button
+-      onClick={onClick}
+-      className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap border transition-colors ${
+-        active ? 'bg-primary text-white border-primary' : 'bg-surface text-ink-soft border-border hover:border-primary'
+-      }`}
+-    >
+-      {label}
+-    </button>
+-  )
+-}
+-
+ // Covers the product grid + cart (not the top bar) while sales are locked —
+ // either because today's day is already closed for good, or because the
+-// cashier chose "I'll open later" / "I'll start my shift later" from the
+-// ShiftModal. dayClosed gets no action button since there's genuinely
+-// nothing to do until the date rolls over; the dismissed case gets a button
+-// that brings the ShiftModal back.
+-function ShiftLockedOverlay({
++// cashier chose "I'll open the day later". dayClosed gets no action button
++// since there's nothing to do until the date rolls over; the dismissed case
++// gets a button that brings the OpenDayModal back.
++function DayLockedOverlay({
+   dayClosed,
+-  mode,
+   onOpen,
+ }: {
+   dayClosed: boolean
+-  mode: 'open_day' | 'start_shift'
+   onOpen?: () => void
+ }) {
+   return (
+@@ -360,28 +420,24 @@ function ShiftLockedOverlay({
+           <>
+             <h3 className="font-bold text-ink">Day closed</h3>
+             <p className="text-sm text-ink-faint">
+-              Today&apos;s books are already closed and can&apos;t be reopened. Sales are locked until a new day is opened.
++              Today&apos;s books are already closed and can&apos;t be reopened. Sales are locked until tomorrow.
+             </p>
+           </>
+         ) : (
+           <>
+-            <h3 className="font-bold text-ink">
+-              {mode === 'open_day' ? 'Day not started' : 'Shift not started'}
+-            </h3>
++            <h3 className="font-bold text-ink">Day not started</h3>
+             <p className="text-sm text-ink-faint">
+-              {mode === 'open_day'
+-                ? "You chose to open the day later. Sales are locked until you open it."
+-                : "You chose to start your shift later. Sales are locked until you clock in."}
++              You chose to open the day later. Sales are locked until you open it.
+             </p>
+             <button
+               onClick={onOpen}
+               className="mt-1 rounded-xl bg-primary text-white font-bold px-5 py-2.5 text-sm"
+             >
+-              {mode === 'open_day' ? 'Open the day' : 'Start shift'}
++              Open the day
+             </button>
+           </>
+         )}
+       </div>
+     </div>
+   )
+-}
+\ No newline at end of file
++}
+diff --git a/src/components/pos/receipt.tsx b/src/components/pos/receipt.tsx
+index 0c2a2be..b6805a4 100644
+--- a/src/components/pos/receipt.tsx
++++ b/src/components/pos/receipt.tsx
+@@ -13,7 +13,7 @@ interface Props {
+ }
+ 
+ interface ReceiptData {
+-  invoice: SaleInvoice & { customers: { name: string } | null; staff: { name: string } | null }
++  invoice: SaleInvoice & { customers: { name: string } | null }
+   lines: SaleLine[]
+   payments: InvoicePayment[]
+ }
+@@ -25,17 +25,10 @@ export default function Receipt({ invoiceId, onClose }: Props) {
+   useEffect(() => {
+     async function load() {
+       const supabase = createClient()
+-      // sale_invoice has TWO foreign keys into staff — staff_id (who rang up
+-      // the sale) and voided_by (who voided it) — so an unqualified
+-      // "staff(name)" embed is ambiguous and PostgREST rejects the whole
+-      // request (PGRST201). The !sale_invoice_staff_id_fkey hint tells it
+-      // which relationship to follow. This is why the receipt used to render
+-      // nothing after checkout: the query errored out and the failure was
+-      // never surfaced, so it just looked like the feature had disappeared.
+       const [invoiceRes, linesRes, paymentsRes] = await Promise.all([
+         supabase
+           .from('sale_invoice')
+-          .select('*, customers(name), staff!sale_invoice_staff_id_fkey(name)')
++          .select('*, customers(name)')
+           .eq('id', invoiceId)
+           .single(),
+         supabase.from('sales').select('*').eq('invoice_id', invoiceId),
+@@ -127,12 +120,6 @@ function ReceiptContent({ invoice, lines, payments, receiptNo }: {
+         <span style={{ color: '#555' }}>Date:</span>
+         <span>{formatDate(invoice.created_at, true)}</span>
+       </div>
+-      {invoice.staff?.name && (
+-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
+-          <span style={{ color: '#555' }}>Served by:</span>
+-          <span>{invoice.staff.name}</span>
+-        </div>
+-      )}
+       {invoice.customers?.name && (
+         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
+           <span style={{ color: '#555' }}>Customer:</span>
+diff --git a/src/components/pos/shift-modal.tsx b/src/components/pos/shift-modal.tsx
+deleted file mode 100644
+index 3c4d7e9..0000000
+--- a/src/components/pos/shift-modal.tsx
++++ /dev/null
+@@ -1,114 +0,0 @@
+-'use client'
+-
+-import { useState } from 'react'
+-import { toast } from 'sonner'
+-import { LogIn, Wallet } from 'lucide-react'
+-import { startShift } from '@/src/app/(app)/shift-actions'
+-
+-interface ShiftModalProps {
+-  mode: 'open_day' | 'start_shift'
+-  staffName: string
+-  onDone: () => void
+-  onDismiss?: () => void
+-}
+-
+-export default function ShiftModal({ mode, staffName, onDone, onDismiss }: ShiftModalProps) {
+-  const [cash, setCash] = useState('')
+-  const [loading, setLoading] = useState(false)
+-
+-  async function handleSubmit() {
+-    if (mode === 'open_day') {
+-      const amount = parseFloat(cash)
+-      if (isNaN(amount) || amount < 0) {
+-        toast.error('Enter a valid starting cash amount')
+-        return
+-      }
+-      setLoading(true)
+-      try {
+-        const { error } = await startShift(amount)
+-        if (error) {
+-          toast.error(error)
+-          return
+-        }
+-        toast.success('Day started')
+-        onDone()
+-      } catch (err) {
+-        toast.error(err instanceof Error ? err.message : 'Could not start the day')
+-      } finally {
+-        setLoading(false)
+-      }
+-      return
+-    }
+-
+-    setLoading(true)
+-    try {
+-      const { error } = await startShift()
+-      if (error) {
+-        toast.error(error)
+-        return
+-      }
+-      toast.success('Shift started')
+-      onDone()
+-    } catch (err) {
+-      toast.error(err instanceof Error ? err.message : 'Could not start your shift')
+-    } finally {
+-      setLoading(false)
+-    }
+-  }
+-
+-  return (
+-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
+-      <div className="w-full max-w-sm bg-surface rounded-2xl border border-border p-6 flex flex-col gap-4">
+-        <div className="flex items-center gap-3">
+-          <div className="w-10 h-10 rounded-full bg-primary-soft text-primary-dark flex items-center justify-center">
+-            {mode === 'open_day' ? <Wallet size={18} /> : <LogIn size={18} />}
+-          </div>
+-          <div>
+-            <h2 className="font-bold text-ink">
+-              {mode === 'open_day' ? 'Start the day' : 'Start your shift'}
+-            </h2>
+-            <p className="text-xs text-ink-faint">{staffName}</p>
+-          </div>
+-        </div>
+-
+-        {mode === 'open_day' ? (
+-          <div className="flex flex-col gap-1.5">
+-            <label className="text-xs font-semibold text-ink-soft">Starting cash in the drawer</label>
+-            <input
+-              type="number"
+-              inputMode="decimal"
+-              autoFocus
+-              value={cash}
+-              onChange={(e) => setCash(e.target.value)}
+-              placeholder="0.00"
+-              className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-lg font-bold text-ink outline-none focus-visible:border-primary"
+-            />
+-          </div>
+-        ) : (
+-          <p className="text-sm text-ink-soft">
+-            The day&apos;s already open. Starting your shift will note the handoff time —
+-            no starting cash needed since the drawer&apos;s already funded.
+-          </p>
+-        )}
+-
+-        <button
+-          onClick={handleSubmit}
+-          disabled={loading}
+-          className="w-full rounded-xl bg-primary text-white font-bold py-3 disabled:opacity-60"
+-        >
+-          {loading ? 'Starting…' : mode === 'open_day' ? 'Open the day' : 'Start shift'}
+-        </button>
+-
+-        {onDismiss && (
+-          <button
+-            onClick={onDismiss}
+-            disabled={loading}
+-            className="w-full text-center text-xs font-semibold text-ink-faint hover:text-ink-soft py-1 disabled:opacity-60"
+-          >
+-            {mode === 'open_day' ? "I'll open the day later" : "I'll start my shift later"}
+-          </button>
+-        )}
+-      </div>
+-    </div>
+-  )
+-}
+\ No newline at end of file
+diff --git a/supabase/migrations/0001_baseline.sql b/supabase/migrations/0001_baseline.sql
+new file mode 100644
+index 0000000..9e3e89b
+--- /dev/null
++++ b/supabase/migrations/0001_baseline.sql
+@@ -0,0 +1,782 @@
++-- ============================================================================
++-- Dotimas POS — V2 baseline schema (consolidates old 0001–0009)
++--
++-- Changes vs. the old migrations:
++--   * Business dates use Asia/Manila (public.business_date), not the server's
++--     UTC clock. Before, 00:00–08:00 Manila counted as the previous day.
++--   * complete_sale is offline-ready: the device can supply the invoice id,
++--     the time the sale happened and the day (session) it belongs to. Re-sending the
++--     same invoice id is a no-op, so a sync queue can retry safely.
++--   * close_day totals the day by session instead of by UTC date,
++--     so sales synced later still land on the right day.
++--   * products.srp restored (it was dropped from V2 by mistake).
++--   * daily_summary / credit_summary views — the dashboard reads these, but
++--     they never existed in V2, so its stats always came back empty.
++--   * No staff/shift tracking. Login (Supabase Auth) still gates the whole
++--     app, but sales aren't attributed to a person. The day is still opened
++--     with starting cash and closed with a drawer count (pos_sessions).
++--   * Indexes on the common lookups; explicit grants for service_role too.
++-- ============================================================================
++
++-- ---------------------------------------------------------------------------
++-- Enums
++-- ---------------------------------------------------------------------------
++create type payment_method_type as enum ('cash','gcash','maya','mixed','credit');
++create type ledger_entry_type as enum ('credit_given','payment_made','opening_balance');
++create type invoice_status as enum ('completed','voided');
++create type gcash_direction as enum ('received','sent');
++create type gcash_submission_status as enum ('pending','confirmed','rejected');
++
++-- ---------------------------------------------------------------------------
++-- Business date: the store runs on Manila time, the database clock is UTC.
++-- Use this everywhere a "day" matters.
++-- ---------------------------------------------------------------------------
++create function public.business_date(p_ts timestamptz default now())
++returns date
++language sql stable
++set search_path = ''
++as $$
++  select (p_ts at time zone 'Asia/Manila')::date
++$$;
++
++-- ---------------------------------------------------------------------------
++-- Catalog
++-- ---------------------------------------------------------------------------
++create table public.product_categories (
++  id uuid primary key default gen_random_uuid(),
++  name text not null unique,
++  sort_order int not null default 0,
++  created_at timestamptz not null default now()
++);
++
++-- stocks is advisory only — never blocks a sale
++create table public.products (
++  id uuid primary key default gen_random_uuid(),
++  name text not null,
++  sku text unique,
++  barcode text unique,
++  volume text,
++  category_id uuid references public.product_categories(id) on delete set null,
++  price numeric not null default 0,
++  cost numeric not null default 0,
++  srp numeric,                       -- suggested retail price (reference only)
++  stocks numeric not null default 0,
++  low_stock_threshold numeric not null default 5,
++  is_active boolean not null default true,
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now()
++);
++create index products_category_idx on public.products (category_id);
++
++create function public.touch_updated_at()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  new.updated_at = now();
++  return new;
++end;
++$$;
++
++create trigger trg_products_touch_updated_at
++  before update on public.products
++  for each row execute function public.touch_updated_at();
++
++-- ---------------------------------------------------------------------------
++-- Customers & settings
++-- ---------------------------------------------------------------------------
++create table public.customers (
++  id uuid primary key default gen_random_uuid(),
++  name text not null,
++  phone text,
++  credit_balance numeric not null default 0,
++  credit_warning_threshold numeric,
++  created_at timestamptz not null default now()
++);
++
++create table public.app_settings (
++  key text primary key,
++  value jsonb not null,
++  updated_at timestamptz not null default now()
++);
++
++insert into public.app_settings (key, value) values
++  ('default_credit_warning_threshold', '1000'),
++  ('store_name', '"Dotimas Store"'),
++  ('receipt_footer_text', '"Salamat po!"');
++
++-- ---------------------------------------------------------------------------
++-- Days & sales
++-- ---------------------------------------------------------------------------
++-- pos_sessions: one row per business day (Manila)
++create table public.pos_sessions (
++  id uuid primary key default gen_random_uuid(),
++  session_date date not null unique default public.business_date(),
++  status text not null default 'open' check (status in ('open','closed')),
++  starting_cash numeric not null,
++  closing_cash numeric,
++  expected_cash numeric,
++  variance numeric,
++  opened_at timestamptz not null default now(),
++  closed_at timestamptz,
++  notes text
++);
++
++-- sale_invoice. created_at = when the sale happened (on the device, for
++-- offline sales); synced_at = when it reached the server.
++create table public.sale_invoice (
++  id uuid primary key default gen_random_uuid(),
++  customer_id uuid references public.customers(id),
++  session_id uuid not null references public.pos_sessions(id),
++  payment_method payment_method_type,
++  is_credit boolean not null default false,
++  amount_received numeric not null default 0,
++  change numeric not null default 0,
++  total_amount numeric not null default 0,
++  status invoice_status not null default 'completed',
++  voided_at timestamptz,
++  void_reason text,
++  created_at timestamptz not null default now(),
++  synced_at timestamptz not null default now()
++);
++create index sale_invoice_session_idx on public.sale_invoice (session_id);
++create index sale_invoice_created_idx on public.sale_invoice (created_at desc);
++create index sale_invoice_customer_idx on public.sale_invoice (customer_id);
++
++-- ledger: single source of truth for credit balance history
++create table public.ledger (
++  id uuid primary key default gen_random_uuid(),
++  customer_id uuid not null references public.customers(id),
++  invoice_id uuid references public.sale_invoice(id),
++  entry_type ledger_entry_type not null,
++  amount numeric not null check (amount > 0),
++  running_balance numeric not null,
++  description text,
++  created_at timestamptz not null default now()
++);
++create index ledger_customer_idx on public.ledger (customer_id, created_at desc);
++
++-- invoice_payments: real tender breakdown
++create table public.invoice_payments (
++  id uuid primary key default gen_random_uuid(),
++  invoice_id uuid not null references public.sale_invoice(id) on delete cascade,
++  method payment_method_type not null,
++  amount numeric not null check (amount > 0)
++);
++create index invoice_payments_invoice_idx on public.invoice_payments (invoice_id);
++
++create function public.refresh_invoice_payment_method()
++returns trigger language plpgsql security definer set search_path = public as $$
++declare
++  v_methods payment_method_type[];
++  v_invoice_id uuid := coalesce(new.invoice_id, old.invoice_id);
++begin
++  select array_agg(distinct method) into v_methods
++  from public.invoice_payments where invoice_id = v_invoice_id;
++
++  update public.sale_invoice
++  set payment_method = case
++    when array_length(v_methods, 1) > 1 then 'mixed'::payment_method_type
++    when array_length(v_methods, 1) = 1 then v_methods[1]
++    else payment_method
++  end
++  where id = v_invoice_id;
++  return new;
++end;
++$$;
++
++create trigger trg_refresh_payment_method
++  after insert or update or delete on public.invoice_payments
++  for each row execute function public.refresh_invoice_payment_method();
++
++-- sales (line items). product_name is snapshotted, so a deleted product
++-- doesn't erase history.
++create table public.sales (
++  id uuid primary key default gen_random_uuid(),
++  invoice_id uuid not null references public.sale_invoice(id) on delete cascade,
++  product_id uuid references public.products(id) on delete set null,
++  product_name text not null,
++  qty numeric not null check (qty > 0),
++  unit_price numeric not null,
++  unit_cost numeric not null default 0,
++  subtotal numeric not null,
++  net_profit numeric not null default 0,
++  created_at timestamptz not null default now()
++);
++create index sales_invoice_idx on public.sales (invoice_id);
++create index sales_product_idx on public.sales (product_id);
++
++-- Stock deduction on sale — advisory only, no floor at zero, never blocks a sale
++create function public.deduct_stock_on_sale()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if new.product_id is not null then
++    update public.products set stocks = stocks - new.qty, updated_at = now()
++    where id = new.product_id;
++  end if;
++  return new;
++end;
++$$;
++
++create trigger trg_deduct_stock_on_sale
++  after insert on public.sales
++  for each row execute function public.deduct_stock_on_sale();
++
++-- expenses
++create table public.expenses (
++  id uuid primary key default gen_random_uuid(),
++  description text not null,
++  category text,
++  amount numeric not null check (amount > 0),
++  expense_date date not null default public.business_date(),
++  notes text,
++  created_at timestamptz not null default now()
++);
++create index expenses_date_idx on public.expenses (expense_date);
++
++-- ---------------------------------------------------------------------------
++-- GCash
++-- ---------------------------------------------------------------------------
++create table public.gcash_log (
++  id uuid primary key default gen_random_uuid(),
++  direction gcash_direction not null,
++  amount numeric not null check (amount > 0),
++  sender text,
++  ref_number text,
++  notes text,
++  txn_date date not null default public.business_date(),
++  created_at timestamptz not null default now()
++);
++
++-- customer-facing kiosk, write-only from the customer's side
++create table public.gcash_submissions (
++  id uuid primary key default gen_random_uuid(),
++  customer_name text not null,
++  direction gcash_direction not null,
++  amount numeric not null check (amount > 0),
++  reference_number text not null,
++  transaction_date date not null,
++  notes text,
++  status gcash_submission_status not null default 'pending',
++  submitted_at timestamptz not null default now(),
++  reviewed_at timestamptz,
++  review_notes text
++);
++
++-- Once a reference number is confirmed it can never be confirmed again.
++create unique index gcash_submissions_confirmed_ref_uidx
++  on public.gcash_submissions (reference_number)
++  where status = 'confirmed';
++
++-- ---------------------------------------------------------------------------
++-- Functions
++-- ---------------------------------------------------------------------------
++
++-- record_credit_change: atomic balance update. p_created_at lets a synced
++-- offline sale keep its real time in the ledger.
++create function public.record_credit_change(
++  p_customer_id uuid,
++  p_invoice_id uuid,
++  p_entry_type ledger_entry_type,
++  p_amount numeric,
++  p_description text default null,
++  p_created_at timestamptz default null
++)
++returns numeric
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_new_balance numeric;
++  v_delta numeric;
++begin
++  if auth.uid() is null then
++    raise exception 'Not authenticated';
++  end if;
++  if p_amount is null or p_amount <= 0 then
++    raise exception 'Amount must be greater than zero';
++  end if;
++
++  v_delta := case when p_entry_type in ('credit_given','opening_balance') then p_amount else -p_amount end;
++
++  update public.customers
++  set credit_balance = credit_balance + v_delta
++  where id = p_customer_id
++  returning credit_balance into v_new_balance;
++
++  if not found then
++    raise exception 'Customer % not found', p_customer_id;
++  end if;
++
++  if p_entry_type = 'payment_made' and v_new_balance < 0 then
++    raise exception 'Payment of % exceeds current balance', p_amount;
++  end if;
++
++  insert into public.ledger (customer_id, invoice_id, entry_type, amount, running_balance, description, created_at)
++  values (p_customer_id, p_invoice_id, p_entry_type, p_amount, v_new_balance, p_description,
++          least(coalesce(p_created_at, now()), now()));
++
++  return v_new_balance;
++end;
++$$;
++
++-- open_day: opens today's business day with the starting drawer cash.
++-- Online only. Calling it again on an already-open day is harmless.
++create function public.open_day(p_starting_cash numeric)
++returns jsonb
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_today date := public.business_date();
++  v_session public.pos_sessions%rowtype;
++begin
++  if auth.uid() is null then
++    raise exception 'Not authenticated';
++  end if;
++
++  -- A previous day that was never closed is still the live drawer: the cash
++  -- in it hasn't been counted yet. Close that one first.
++  select * into v_session from public.pos_sessions
++  where status = 'open' order by session_date desc limit 1;
++
++  if found then
++    if v_session.session_date < v_today then
++      raise exception 'The day % was never closed. Close it before opening today', v_session.session_date;
++    end if;
++    return jsonb_build_object('session_id', v_session.id, 'mode', 'already_open');
++  end if;
++
++  if exists (select 1 from public.pos_sessions where session_date = v_today) then
++    raise exception 'Today''s day has already been closed';
++  end if;
++
++  if p_starting_cash is null or p_starting_cash < 0 then
++    raise exception 'Starting cash is required to open the day';
++  end if;
++
++  insert into public.pos_sessions (session_date, status, starting_cash, opened_at)
++  values (v_today, 'open', p_starting_cash, now())
++  returning * into v_session;
++
++  return jsonb_build_object('session_id', v_session.id, 'mode', 'day_opened');
++end;
++$$;
++
++-- close_day: server-computed reconciliation, never trusts client totals.
++-- Closes the open day (even if it's now past midnight) and counts every sale
++-- recorded against it, whenever it was synced. The app must sync any offline
++-- sales BEFORE calling this — complete_sale rejects sales for a closed day.
++create function public.close_day(p_closing_cash numeric, p_notes text default null)
++returns jsonb
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_session_id uuid;
++  v_session_date date;
++  v_starting numeric;
++  v_cash_collected numeric;
++  v_change_given numeric;
++  v_expenses numeric;
++  v_expected numeric;
++  v_variance numeric;
++begin
++  if auth.uid() is null then raise exception 'Not authenticated'; end if;
++  if p_closing_cash is null or p_closing_cash < 0 then
++    raise exception 'Enter the counted cash';
++  end if;
++
++  select id, session_date, starting_cash into v_session_id, v_session_date, v_starting
++  from public.pos_sessions
++  where status = 'open'
++  order by session_date desc
++  limit 1
++  for update;
++
++  if v_session_id is null then
++    raise exception 'There is no open day to close';
++  end if;
++
++  select coalesce(sum(ip.amount), 0) into v_cash_collected
++  from public.invoice_payments ip
++  join public.sale_invoice si on si.id = ip.invoice_id
++  where si.session_id = v_session_id and si.status = 'completed' and ip.method = 'cash';
++
++  select coalesce(sum(change), 0) into v_change_given
++  from public.sale_invoice
++  where session_id = v_session_id and status = 'completed';
++
++  select coalesce(sum(amount), 0) into v_expenses
++  from public.expenses where expense_date = v_session_date;
++
++  v_expected := v_starting + v_cash_collected - v_change_given - v_expenses;
++  v_variance := p_closing_cash - v_expected;
++
++  update public.pos_sessions
++  set status = 'closed', closing_cash = p_closing_cash, expected_cash = v_expected,
++      variance = v_variance, closed_at = now(),
++      notes = coalesce(p_notes, notes)
++  where id = v_session_id;
++
++  return jsonb_build_object(
++    'session_date', v_session_date,
++    'expected_cash', v_expected,
++    'variance', v_variance,
++    'closing_cash', p_closing_cash
++  );
++end;
++$$;
++
++-- complete_sale: re-derives cost server-side, supports real mixed tender, no
++-- stock gating. Offline-ready:
++--   p_invoice_id  id generated on the device. Re-sending an id that already
++--                 exists returns it without doing anything (safe retries).
++--   p_sold_at     when the sale happened on the device (default now()).
++--                 Clamped so it can't be in the future or before the day opened.
++--   p_session_id  the day that was open on the device (default: the open
++--                 day). It must not be closed yet.
++-- Item price: "custom_price" overrides the catalog price. For offline/queued
++-- sales the device should send the price it actually charged, so a price
++-- edit made before the sync can't change what the customer paid.
++create function public.complete_sale(
++  p_customer_id uuid,
++  p_payments jsonb,      -- [{ "method": "cash", "amount": 100 }, ...]
++  p_is_credit boolean,
++  p_items jsonb,         -- [{ "product_id": uuid|null, "product_name": text, "qty": n, "custom_price": numeric|null }]
++  p_invoice_id uuid default null,
++  p_sold_at timestamptz default null,
++  p_session_id uuid default null
++)
++returns uuid
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_session public.pos_sessions%rowtype;
++  v_sold_at timestamptz;
++  v_invoice_id uuid;
++  v_item jsonb;
++  v_pay jsonb;
++  v_product_id uuid;
++  v_qty numeric;
++  v_unit_price numeric;
++  v_unit_cost numeric;
++  v_subtotal numeric;
++  v_net_profit numeric;
++  v_total numeric := 0;
++  v_total_paid numeric := 0;
++  v_change numeric;
++  v_pname text;
++begin
++  if auth.uid() is null then
++    raise exception 'Not authenticated';
++  end if;
++
++  -- Already synced? Then this is a retry: report success, change nothing.
++  if p_invoice_id is not null and exists (select 1 from public.sale_invoice where id = p_invoice_id) then
++    return p_invoice_id;
++  end if;
++
++  if p_session_id is not null then
++    select * into v_session from public.pos_sessions where id = p_session_id;
++    if not found then
++      raise exception 'That day was not found';
++    end if;
++  else
++    select * into v_session from public.pos_sessions
++    where status = 'open' order by session_date desc limit 1;
++    if not found then
++      raise exception 'Open the day before making a sale';
++    end if;
++  end if;
++
++  if v_session.status = 'closed' then
++    raise exception 'The day % is already closed, so this sale can no longer be added', v_session.session_date;
++  end if;
++
++  -- When did it happen? Trust the device, but not before the day opened and
++  -- not in the future.
++  v_sold_at := coalesce(p_sold_at, now());
++  v_sold_at := least(v_sold_at, now());
++  v_sold_at := greatest(v_sold_at, v_session.opened_at);
++
++  if p_items is null or jsonb_array_length(p_items) = 0 then
++    raise exception 'Cart is empty';
++  end if;
++
++  insert into public.sale_invoice (id, customer_id, session_id, is_credit, total_amount, created_at)
++  values (coalesce(p_invoice_id, gen_random_uuid()), p_customer_id, v_session.id, p_is_credit, 0, v_sold_at)
++  on conflict (id) do nothing
++  returning id into v_invoice_id;
++
++  -- Lost a race with an identical retry that committed first.
++  if v_invoice_id is null then
++    return p_invoice_id;
++  end if;
++
++  for v_item in select * from jsonb_array_elements(p_items) loop
++    v_product_id := nullif(v_item->>'product_id', '')::uuid;
++    v_qty        := (v_item->>'qty')::numeric;
++    v_pname      := v_item->>'product_name';
++
++    if v_qty is null or v_qty <= 0 then
++      raise exception 'Invalid quantity for %', coalesce(v_pname, 'item');
++    end if;
++
++    if v_product_id is not null then
++      select price, cost, coalesce(v_pname, name) into v_unit_price, v_unit_cost, v_pname
++      from public.products where id = v_product_id;
++      if not found then
++        raise exception 'Product % no longer exists', v_product_id;
++      end if;
++      -- is_active never blocks a sale (staff can opt in to sell inactive stock)
++      if v_item->>'custom_price' is not null then
++        v_unit_price := greatest((v_item->>'custom_price')::numeric, 0);
++      end if;
++    else
++      v_unit_price := (v_item->>'custom_price')::numeric;
++      v_unit_cost := 0;
++      if v_unit_price is null or v_unit_price < 0 then
++        raise exception 'Custom item % needs a valid price', coalesce(v_pname, '(unnamed)');
++      end if;
++      if v_pname is null or trim(v_pname) = '' then
++        raise exception 'Custom item needs a name';
++      end if;
++    end if;
++
++    v_unit_cost  := coalesce(v_unit_cost, 0);
++    v_subtotal   := v_unit_price * v_qty;
++    v_net_profit := (v_unit_price - v_unit_cost) * v_qty;
++    v_total      := v_total + v_subtotal;
++
++    insert into public.sales (invoice_id, product_id, product_name, qty, unit_price, unit_cost, subtotal, net_profit, created_at)
++    values (v_invoice_id, v_product_id, v_pname, v_qty, v_unit_price, v_unit_cost, v_subtotal, v_net_profit, v_sold_at);
++  end loop;
++
++  if p_is_credit then
++    if p_customer_id is null then
++      raise exception 'Credit sale requires a customer';
++    end if;
++    insert into public.invoice_payments (invoice_id, method, amount) values (v_invoice_id, 'credit', v_total);
++    perform public.record_credit_change(
++      p_customer_id, v_invoice_id, 'credit_given'::ledger_entry_type, v_total,
++      'Credit from invoice #' || upper(left(v_invoice_id::text, 8)),
++      v_sold_at
++    );
++    update public.sale_invoice set amount_received = 0, change = 0, total_amount = v_total where id = v_invoice_id;
++  else
++    if p_payments is null or jsonb_array_length(p_payments) = 0 then
++      raise exception 'Payment breakdown is required';
++    end if;
++    for v_pay in select * from jsonb_array_elements(p_payments) loop
++      if (v_pay->>'method') = 'credit' then
++        raise exception 'Use a credit sale instead of a credit payment line';
++      end if;
++      v_total_paid := v_total_paid + (v_pay->>'amount')::numeric;
++      insert into public.invoice_payments (invoice_id, method, amount)
++      values (v_invoice_id, (v_pay->>'method')::payment_method_type, (v_pay->>'amount')::numeric);
++    end loop;
++
++    if v_total_paid < v_total then
++      raise exception 'Amount received (%) is less than the total (%)', v_total_paid, v_total;
++    end if;
++    v_change := v_total_paid - v_total;
++
++    update public.sale_invoice
++    set amount_received = v_total_paid, change = v_change, total_amount = v_total
++    where id = v_invoice_id;
++  end if;
++
++  return v_invoice_id;
++end;
++$$;
++
++-- void_sale: reverses stock and any credit ledger entry atomically
++create function public.void_sale(p_invoice_id uuid, p_reason text)
++returns void
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_invoice public.sale_invoice%rowtype;
++  v_line record;
++begin
++  if auth.uid() is null then raise exception 'Not authenticated'; end if;
++  if p_reason is null or trim(p_reason) = '' then
++    raise exception 'A reason is required to void a sale';
++  end if;
++
++  select * into v_invoice from public.sale_invoice where id = p_invoice_id for update;
++  if not found then raise exception 'Invoice not found'; end if;
++  if v_invoice.status = 'voided' then raise exception 'This sale is already voided'; end if;
++
++  for v_line in select * from public.sales where invoice_id = p_invoice_id loop
++    if v_line.product_id is not null then
++      update public.products set stocks = stocks + v_line.qty where id = v_line.product_id;
++    end if;
++  end loop;
++
++  if v_invoice.is_credit and v_invoice.customer_id is not null then
++    perform public.record_credit_change(
++      v_invoice.customer_id, v_invoice.id, 'payment_made'::ledger_entry_type,
++      v_invoice.total_amount, 'Reversed — sale voided: ' || p_reason
++    );
++  end if;
++
++  update public.sale_invoice
++  set status = 'voided', voided_at = now(), void_reason = p_reason
++  where id = p_invoice_id;
++end;
++$$;
++
++-- confirm/reject GCash kiosk submissions
++create function public.confirm_gcash_submission(p_id uuid)
++returns void language plpgsql security definer set search_path = public as $$
++declare
++  v_ref text;
++  v_status gcash_submission_status;
++begin
++  if auth.uid() is null then raise exception 'Not authenticated'; end if;
++
++  select reference_number, status into v_ref, v_status from public.gcash_submissions where id = p_id;
++  if not found then raise exception 'Submission not found'; end if;
++  if v_status <> 'pending' then raise exception 'This submission has already been reviewed'; end if;
++
++  if exists (
++    select 1 from public.gcash_submissions
++    where reference_number = v_ref and status = 'confirmed' and id <> p_id
++  ) then
++    raise exception 'Reference number % has already been confirmed on another entry', v_ref;
++  end if;
++
++  update public.gcash_submissions
++  set status = 'confirmed', reviewed_at = now()
++  where id = p_id;
++end;
++$$;
++
++create function public.reject_gcash_submission(p_id uuid, p_notes text default null)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if auth.uid() is null then raise exception 'Not authenticated'; end if;
++  update public.gcash_submissions
++  set status = 'rejected', reviewed_at = now(), review_notes = p_notes
++  where id = p_id and status = 'pending';
++  if not found then raise exception 'Submission not found or already reviewed'; end if;
++end;
++$$;
++
++-- ---------------------------------------------------------------------------
++-- Views (dashboard). security_invoker so they respect RLS like the tables.
++-- ---------------------------------------------------------------------------
++create view public.daily_summary with (security_invoker = true) as
++select
++  public.business_date(si.created_at)                                   as sale_date,
++  coalesce(sum(si.total_amount), 0)                                     as gross_sales,
++  count(*)                                                              as invoice_count,
++  coalesce(sum(si.total_amount) filter (where si.is_credit), 0)         as credit_given,
++  coalesce(sum(s.profit), 0)                                            as net_profit
++from public.sale_invoice si
++left join (
++  select invoice_id, sum(net_profit) as profit from public.sales group by invoice_id
++) s on s.invoice_id = si.id
++where si.status = 'completed'
++group by public.business_date(si.created_at);
++
++create view public.credit_summary with (security_invoker = true) as
++select id, name, phone, credit_balance, credit_warning_threshold
++from public.customers
++where credit_balance > 0;
++
++-- ---------------------------------------------------------------------------
++-- Row level security — on for every table
++-- ---------------------------------------------------------------------------
++alter table public.product_categories enable row level security;
++alter table public.products enable row level security;
++alter table public.customers enable row level security;
++alter table public.ledger enable row level security;
++alter table public.pos_sessions enable row level security;
++alter table public.sale_invoice enable row level security;
++alter table public.invoice_payments enable row level security;
++alter table public.sales enable row level security;
++alter table public.expenses enable row level security;
++alter table public.gcash_log enable row level security;
++alter table public.gcash_submissions enable row level security;
++alter table public.app_settings enable row level security;
++
++-- Shared reference/operational data: full access for any signed-in user
++create policy "product_categories full access" on public.product_categories for all to authenticated using (true) with check (true);
++create policy "products full access" on public.products for all to authenticated using (true) with check (true);
++create policy "customers full access" on public.customers for all to authenticated using (true) with check (true);
++create policy "app_settings full access" on public.app_settings for all to authenticated using (true) with check (true);
++create policy "gcash_log full access" on public.gcash_log for all to authenticated using (true) with check (true);
++
++-- Transactional/audit tables: read + write, no delete via the API —
++-- corrections go through void_sale / new ledger entries.
++create policy "ledger read" on public.ledger for select to authenticated using (true);
++create policy "ledger insert" on public.ledger for insert to authenticated with check (true);
++create policy "pos_sessions read" on public.pos_sessions for select to authenticated using (true);
++create policy "pos_sessions insert" on public.pos_sessions for insert to authenticated with check (true);
++create policy "pos_sessions update" on public.pos_sessions for update to authenticated using (true);
++create policy "sale_invoice read" on public.sale_invoice for select to authenticated using (true);
++create policy "sale_invoice insert" on public.sale_invoice for insert to authenticated with check (true);
++create policy "sale_invoice update" on public.sale_invoice for update to authenticated using (true);
++create policy "invoice_payments read" on public.invoice_payments for select to authenticated using (true);
++create policy "invoice_payments insert" on public.invoice_payments for insert to authenticated with check (true);
++create policy "sales read" on public.sales for select to authenticated using (true);
++create policy "sales insert" on public.sales for insert to authenticated with check (true);
++create policy "expenses read" on public.expenses for select to authenticated using (true);
++create policy "expenses insert" on public.expenses for insert to authenticated with check (true);
++
++-- gcash_submissions: anon (the kiosk) can create but never read anything back
++create policy "gcash_submissions kiosk insert" on public.gcash_submissions for insert to anon with check (true);
++create policy "gcash_submissions staff read" on public.gcash_submissions for select to authenticated using (true);
++create policy "gcash_submissions staff review" on public.gcash_submissions for update to authenticated using (true);
++
++-- ---------------------------------------------------------------------------
++-- Table privileges. This project does NOT auto-grant new tables, and RLS only
++-- filters rows a role is already allowed to touch — so every grant is explicit.
++-- ---------------------------------------------------------------------------
++grant select, insert, update, delete on public.product_categories to authenticated;
++grant select, insert, update, delete on public.products to authenticated;
++grant select, insert, update, delete on public.customers to authenticated;
++grant select, insert, update, delete on public.app_settings to authenticated;
++grant select, insert, update, delete on public.gcash_log to authenticated;
++
++grant select, insert on public.ledger to authenticated;
++grant select, insert, update on public.pos_sessions to authenticated;
++grant select, insert, update on public.sale_invoice to authenticated;
++grant select, insert on public.invoice_payments to authenticated;
++grant select, insert on public.sales to authenticated;
++grant select, insert on public.expenses to authenticated;
++
++grant insert on public.gcash_submissions to anon;
++grant select, update on public.gcash_submissions to authenticated;
++
++grant select on public.daily_summary to authenticated;
++grant select on public.credit_summary to authenticated;
++
++-- service_role (server-side admin key only; bypasses RLS) — full access
++grant all on all tables in schema public to service_role;
++
++-- ---------------------------------------------------------------------------
++-- Function privileges: RPCs for signed-in staff only; trigger functions are
++-- never callable directly.
++-- ---------------------------------------------------------------------------
++revoke execute on function public.record_credit_change(uuid, uuid, ledger_entry_type, numeric, text, timestamptz) from public, anon;
++revoke execute on function public.open_day(numeric) from public, anon;
++revoke execute on function public.close_day(numeric, text) from public, anon;
++revoke execute on function public.complete_sale(uuid, jsonb, boolean, jsonb, uuid, timestamptz, uuid) from public, anon;
++revoke execute on function public.void_sale(uuid, text) from public, anon;
++revoke execute on function public.confirm_gcash_submission(uuid) from public, anon;
++revoke execute on function public.reject_gcash_submission(uuid, text) from public, anon;
++
++grant execute on function public.record_credit_change(uuid, uuid, ledger_entry_type, numeric, text, timestamptz) to authenticated, service_role;
++grant execute on function public.open_day(numeric) to authenticated, service_role;
++grant execute on function public.close_day(numeric, text) to authenticated, service_role;
++grant execute on function public.complete_sale(uuid, jsonb, boolean, jsonb, uuid, timestamptz, uuid) to authenticated, service_role;
++grant execute on function public.void_sale(uuid, text) to authenticated, service_role;
++grant execute on function public.confirm_gcash_submission(uuid) to authenticated, service_role;
++grant execute on function public.reject_gcash_submission(uuid, text) to authenticated, service_role;
++
++revoke execute on function public.deduct_stock_on_sale() from public, anon, authenticated;
++revoke execute on function public.refresh_invoice_payment_method() from public, anon, authenticated;
++revoke execute on function public.touch_updated_at() from public, anon, authenticated;
++
++-- business_date is harmless and used by the views, so signed-in staff need it
++revoke execute on function public.business_date(timestamptz) from public, anon;
++grant execute on function public.business_date(timestamptz) to authenticated, service_role;
+diff --git a/supabase/migrations/0001_enums_and_core_reference_tables.sql b/supabase/migrations_archive/0001_enums_and_core_reference_tables.sql
+similarity index 100%
+rename from supabase/migrations/0001_enums_and_core_reference_tables.sql
+rename to supabase/migrations_archive/0001_enums_and_core_reference_tables.sql
+diff --git a/supabase/migrations/0002_shifts_sales_and_ledger.sql b/supabase/migrations_archive/0002_shifts_sales_and_ledger.sql
+similarity index 100%
+rename from supabase/migrations/0002_shifts_sales_and_ledger.sql
+rename to supabase/migrations_archive/0002_shifts_sales_and_ledger.sql
+diff --git a/supabase/migrations/0003_gcash.sql b/supabase/migrations_archive/0003_gcash.sql
+similarity index 100%
+rename from supabase/migrations/0003_gcash.sql
+rename to supabase/migrations_archive/0003_gcash.sql
+diff --git a/supabase/migrations/0004_functions.sql b/supabase/migrations_archive/0004_functions.sql
+similarity index 100%
+rename from supabase/migrations/0004_functions.sql
+rename to supabase/migrations_archive/0004_functions.sql
+diff --git a/supabase/migrations/0005_rls.sql b/supabase/migrations_archive/0005_rls.sql
+similarity index 100%
+rename from supabase/migrations/0005_rls.sql
+rename to supabase/migrations_archive/0005_rls.sql
+diff --git a/supabase/migrations/0006_function_permissions.sql b/supabase/migrations_archive/0006_function_permissions.sql
+similarity index 100%
+rename from supabase/migrations/0006_function_permissions.sql
+rename to supabase/migrations_archive/0006_function_permissions.sql
+diff --git a/supabase/migrations/0007_lock_down_trigger_functions.sql b/supabase/migrations_archive/0007_lock_down_trigger_functions.sql
+similarity index 100%
+rename from supabase/migrations/0007_lock_down_trigger_functions.sql
+rename to supabase/migrations_archive/0007_lock_down_trigger_functions.sql
+diff --git a/supabase/migrations/0008_grant_table_privileges.sql b/supabase/migrations_archive/0008_grant_table_privileges.sql
+similarity index 100%
+rename from supabase/migrations/0008_grant_table_privileges.sql
+rename to supabase/migrations_archive/0008_grant_table_privileges.sql
+diff --git a/supabase/migrations/0009_allow_inactive_product_sales.sql b/supabase/migrations_archive/0009_allow_inactive_product_sales.sql
+similarity index 100%
+rename from supabase/migrations/0009_allow_inactive_product_sales.sql
+rename to supabase/migrations_archive/0009_allow_inactive_product_sales.sql
+diff --git a/supabase/reset/reset_public_schema.sql b/supabase/reset/reset_public_schema.sql
+new file mode 100644
+index 0000000..8adb741
+--- /dev/null
++++ b/supabase/reset/reset_public_schema.sql
+@@ -0,0 +1,68 @@
++-- ============================================================================
++-- ONE-TIME RESET — wipes every Dotimas POS object in the public schema.
++-- Run this ONCE, right before applying migrations/0001_baseline.sql.
++--
++-- Keeps: auth.users (your logins). Logins still gate the app; there is no
++--        separate staff table any more.
++-- Drops: every table, view, function and enum below, and ALL their data
++--        (products, categories, customers, sales, ledger, sessions, ...).
++--        Export anything you want to keep (e.g. Products → Export CSV) first.
++-- ============================================================================
++
++begin;
++
++drop trigger if exists on_auth_user_created on auth.users;
++
++drop view if exists public.daily_summary;
++drop view if exists public.credit_summary;
++
++drop table if exists
++  public.ledger,
++  public.invoice_payments,
++  public.sales,
++  public.sale_invoice,
++  public.expenses,
++  public.staff_shifts,
++  public.pos_sessions,
++  public.gcash_submissions,
++  public.gcash_log,
++  public.products,
++  public.product_categories,
++  public.customers,
++  public.app_settings,
++  public.staff
++cascade;
++
++drop function if exists public.complete_sale(uuid, jsonb, boolean, jsonb) cascade;
++drop function if exists public.complete_sale(uuid, jsonb, boolean, jsonb, uuid, timestamptz, uuid) cascade;
++drop function if exists public.record_credit_change(uuid, uuid, ledger_entry_type, numeric, text) cascade;
++drop function if exists public.record_credit_change(uuid, uuid, ledger_entry_type, numeric, text, timestamptz) cascade;
++drop function if exists public.start_shift(numeric) cascade;
++drop function if exists public.open_day(numeric) cascade;
++drop function if exists public.close_day(numeric, text) cascade;
++drop function if exists public.void_sale(uuid, text) cascade;
++drop function if exists public.confirm_gcash_submission(uuid) cascade;
++drop function if exists public.reject_gcash_submission(uuid, text) cascade;
++drop function if exists public.handle_new_user() cascade;
++drop function if exists public.touch_updated_at() cascade;
++drop function if exists public.refresh_invoice_payment_method() cascade;
++drop function if exists public.deduct_stock_on_sale() cascade;
++drop function if exists public.business_date(timestamptz) cascade;
++
++drop type if exists payment_method_type cascade;
++drop type if exists ledger_entry_type cascade;
++drop type if exists invoice_status cascade;
++drop type if exists gcash_direction cascade;
++drop type if exists gcash_submission_status cascade;
++
++-- Clear the old migration history (0001–0009 + two July leftovers) so it
++-- doesn't claim objects that no longer exist. Only bookkeeping — skipped if
++-- the table isn't there.
++do $$
++begin
++  if to_regclass('supabase_migrations.schema_migrations') is not null then
++    delete from supabase_migrations.schema_migrations;
++  end if;
++end $$;
++
++commit;
+diff --git a/types/database.ts b/types/database.ts
+index 6906ecb..4449a64 100644
+--- a/types/database.ts
++++ b/types/database.ts
+@@ -1,4 +1,4 @@
+-// Types mirror the live V2 schema (supabase/migrations/0001-0007). Keep these
++// Types mirror the live V2 schema (supabase/migrations/0001_baseline.sql). Keep these
+ // in sync with the DB — if a migration changes a column, update it here too.
+ 
+ export type PaymentMethod = 'cash' | 'gcash' | 'maya' | 'mixed' | 'credit'
+@@ -8,14 +8,6 @@ export type GcashDirection = 'received' | 'sent'
+ export type GcashSubmissionStatus = 'pending' | 'confirmed' | 'rejected'
+ export type SessionStatus = 'open' | 'closed'
+ 
+-export interface Staff {
+-  id: string
+-  name: string
+-  initials: string
+-  is_active: boolean
+-  created_at: string
+-}
+-
+ export interface ProductCategory {
+   id: string
+   name: string
+@@ -32,6 +24,7 @@ export interface Product {
+   category_id: string | null
+   price: number
+   cost: number
++  srp: number | null
+   stocks: number
+   low_stock_threshold: number
+   is_active: boolean
+@@ -58,7 +51,6 @@ export interface LedgerEntry {
+   amount: number
+   running_balance: number
+   description: string | null
+-  created_by: string | null
+   created_at: string
+ }
+ 
+@@ -70,26 +62,15 @@ export interface PosSession {
+   closing_cash: number | null
+   expected_cash: number | null
+   variance: number | null
+-  opened_by: string | null
+   opened_at: string
+-  closed_by: string | null
+   closed_at: string | null
+   notes: string | null
+ }
+ 
+-export interface StaffShift {
+-  id: string
+-  session_id: string
+-  staff_id: string
+-  started_at: string
+-  ended_at: string | null
+-}
+-
+ export interface SaleInvoice {
+   id: string
+   customer_id: string | null
+-  staff_id: string | null
+-  shift_id: string | null
++  session_id: string
+   payment_method: PaymentMethod | null
+   is_credit: boolean
+   amount_received: number
+@@ -97,9 +78,9 @@ export interface SaleInvoice {
+   total_amount: number
+   status: InvoiceStatus
+   voided_at: string | null
+-  voided_by: string | null
+   void_reason: string | null
+-  created_at: string
++  created_at: string // when the sale happened (device time for offline sales)
++  synced_at: string  // when it reached the server
+ }
+ 
+ export interface InvoicePayment {
+@@ -124,8 +105,6 @@ export interface SaleLine {
+ 
+ export interface Expense {
+   id: string
+-  staff_id: string | null
+-  shift_id: string | null
+   description: string
+   category: string | null
+   amount: number
+@@ -142,7 +121,6 @@ export interface GcashLogEntry {
+   ref_number: string | null
+   notes: string | null
+   txn_date: string
+-  created_by: string | null
+   created_at: string
+ }
+ 
+@@ -156,7 +134,6 @@ export interface GcashSubmission {
+   notes: string | null
+   status: GcashSubmissionStatus
+   submitted_at: string
+-  reviewed_by: string | null
+   reviewed_at: string | null
+   review_notes: string | null
+ }
+-- 
+2.43.0
+
