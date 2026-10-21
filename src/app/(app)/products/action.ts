@@ -266,11 +266,19 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
   const toInsert = new Map<string, Pending>()
   const toUpdate = new Map<string, Pending>() // key = existing product id
   const newByBarcode = new Map<string, string>()
+  const barcodeOwner = new Map<string, { label: string; name: string; volume: string; display: string }>()
   const newBySku = new Map<string, string>()
 
   for (const sheetName of workbook.SheetNames) {
     const rawRows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName])
     if (rawRows.length === 0) continue
+
+    // Notes/report tabs (e.g. "Review", "Product Report") have no product
+    // names at all. Skip them entirely so they don't become empty categories.
+    if (!rawRows.some(r => normalizeRow(r).name)) {
+      skippedRows.push(`[${sheetName}] no "name" column with values — whole tab ignored (not a product sheet)`)
+      continue
+    }
 
     const categoryId = await getOrCreateCategoryId(sheetName)
 
@@ -287,7 +295,21 @@ export async function importProducts(formData: FormData): Promise<ImportResult> 
       const hasPrice = row.price !== undefined && row.price >= 0
       if (!hasPrice) results.missing_price++
 
-      const barcode = row.barcode || null
+      // Two DIFFERENT products (name or volume differ) sharing one barcode in
+      // the file is almost always a typo. Keep both instead of letting the
+      // later row overwrite the earlier one: the later row loses the barcode,
+      // and the result says so. The same item listed twice is left alone and
+      // simply merges below.
+      let barcode = row.barcode || null
+      if (barcode) {
+        const owner = barcodeOwner.get(barcode)
+        if (owner && (owner.name !== norm(row.name) || owner.volume !== norm(row.volume))) {
+          skippedRows.push(`${label}: barcode ${barcode} is also on ${owner.label} ("${owner.display}") — imported "${row.name}" WITHOUT a barcode; fix it in the file`)
+          barcode = null
+        } else if (!owner) {
+          barcodeOwner.set(barcode, { label, name: norm(row.name), volume: norm(row.volume), display: row.name })
+        }
+      }
       const existingId =
         (barcode && byBarcode.get(barcode)) ||
         (row.sku && bySku.get(row.sku)) ||
