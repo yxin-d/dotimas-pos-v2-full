@@ -13,7 +13,7 @@ import ProductPreviewPane from './product-preview-pane'
 import BulkEditModal from './bulk-edit-modal'
 import type { Product, ProductCategory } from '@/types/database'
 
-type StatusFilter = '' | 'active' | 'inactive' | 'low_margin'
+type StatusFilter = '' | 'active' | 'inactive' | 'low_margin' | 'healthy_margin'
 
 // Margin = selling price − cost, and as a % of the selling price.
 // "low" = under 10%, which is where a small cost increase starts to hurt.
@@ -56,9 +56,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
     if (error) toast.error('Failed to load products: ' + error.message)
     // Margin is calculated, not a column, so this filter runs here.
     const rows = (data ?? []) as Product[]
-    setProducts(statusFilter === 'low_margin'
-      ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
-      : rows)
+    setProducts(
+      statusFilter === 'low_margin'
+        ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
+        : statusFilter === 'healthy_margin'
+          ? rows.filter(p => marginOf(p).kind === 'ok')
+          : rows
+    )
     setLoading(false)
   }, [search, categoryFilter, statusFilter])
 
@@ -202,6 +206,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
           <option value="active">Active only</option>
           <option value="inactive">Inactive only</option>
           <option value="low_margin">Low margin or loss (under {LOW_MARGIN_PCT}%)</option>
+          <option value="healthy_margin">Healthy margin ({LOW_MARGIN_PCT}% or more)</option>
         </select>
         <div className="flex items-center gap-2 bg-primary-soft border border-dashed border-primary rounded-xl px-3 py-2 text-xs font-bold text-primary-dark">
           <Scan size={14} /> Scan to find

@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate } from '@/lib/utils/date'
-import { Search, TrendingUp, TrendingDown, AlertTriangle, ArrowRight } from 'lucide-react'
+import { toast } from 'sonner'
+import { Search, TrendingUp, TrendingDown, AlertTriangle, ArrowRight, Check, Undo2 } from 'lucide-react'
 
 interface ChangeRow {
   id: string
@@ -16,11 +17,15 @@ interface ChangeRow {
   old_price: number
   new_price: number
   changed_at: string
+  reviewed_at: string | null
+  // the database rows this displayed row stands for (several when older
+  // same-day rows are merged); reviewing marks all of them
+  ids?: string[]
   products: { price: number; cost: number; name: string } | null
   product_categories: { name: string } | null
 }
 
-type Filter = 'all' | 'review' | 'cost_up' | 'cost_down'
+type Filter = 'all' | 'review' | 'reviewed' | 'cost_up' | 'cost_down'
 
 function daysAgo(n: number): string {
   return manilaDate(new Date(Date.now() - n * 86_400_000))
@@ -41,9 +46,12 @@ function analyse(r: ChangeRow) {
   const marginPctNow = now && now.price > 0 ? ((now.price - now.cost) / now.price) * 100 : null
   // Cost went up, the price didn't move with it, and it still hasn't been
   // raised since. Deleted products can't be reviewed, so they're excluded.
-  const needsReview = costDelta > 0 && priceDelta <= 0 && !!now && now.price <= r.new_price
+  const flagged = costDelta > 0 && priceDelta <= 0 && !!now && now.price <= r.new_price
   const atLoss = !!now && now.price > 0 && now.price <= now.cost
-  return { costDelta, priceDelta, costPct, marginNow, marginPctNow, needsReview, atLoss }
+  // Someone checked it and decided the price is fine: no more warning.
+  const reviewed = !!r.reviewed_at && (flagged || atLoss)
+  const needsReview = flagged && !reviewed
+  return { costDelta, priceDelta, costPct, marginNow, marginPctNow, needsReview, atLoss, reviewed }
 }
 
 export default function PriceChangesPage() {
@@ -90,8 +98,15 @@ export default function PriceChangesPage() {
       const key = `${r.product_id ?? r.product_name}|${manilaDate(new Date(r.changed_at))}`
       const prev = byKey.get(key)
       byKey.set(key, prev
-        ? { ...r, old_cost: prev.old_cost, old_price: prev.old_price }
-        : r)
+        ? {
+            ...r,
+            old_cost: prev.old_cost,
+            old_price: prev.old_price,
+            ids: [...(prev.ids ?? [prev.id]), r.id],
+            // reviewed only if every underlying row was
+            reviewed_at: prev.reviewed_at && r.reviewed_at ? r.reviewed_at : null,
+          }
+        : { ...r, ids: [r.id] })
     }
     return [...byKey.values()]
       .filter(r => r.old_cost !== r.new_cost || r.old_price !== r.new_price)
@@ -103,6 +118,7 @@ export default function PriceChangesPage() {
   const counts = useMemo(() => ({
     all: analysed.length,
     review: analysed.filter(x => x.a.needsReview).length,
+    reviewed: analysed.filter(x => x.a.reviewed).length,
     cost_up: analysed.filter(x => x.a.costDelta > 0).length,
     cost_down: analysed.filter(x => x.a.costDelta < 0).length,
   }), [analysed])
@@ -112,11 +128,29 @@ export default function PriceChangesPage() {
     return analysed.filter(({ r, a }) => {
       if (q && !r.product_name.toLowerCase().includes(q)) return false
       if (filter === 'review') return a.needsReview
+      if (filter === 'reviewed') return a.reviewed
       if (filter === 'cost_up') return a.costDelta > 0
       if (filter === 'cost_down') return a.costDelta < 0
       return true
     })
   }, [analysed, search, filter])
+
+  // Mark (or un-mark) a flagged change as checked. Updated on screen right
+  // away; put back if the save fails.
+  async function setReviewed(row: ChangeRow, reviewed: boolean) {
+    const ids = row.ids ?? [row.id]
+    const stamp = reviewed ? new Date().toISOString() : null
+    const before = rows
+    setRows(rs => rs.map(r => (ids.includes(r.id) ? { ...r, reviewed_at: stamp } : r)))
+    const supabase = createClient()
+    const { error } = await supabase.from('product_price_changes').update({ reviewed_at: stamp }).in('id', ids)
+    if (error) {
+      setRows(before)
+      toast.error(`Couldn't save: ${error.message}`)
+    } else {
+      toast.success(reviewed ? `${row.product_name} marked as reviewed` : 'Review undone')
+    }
+  }
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -131,6 +165,7 @@ export default function PriceChangesPage() {
       <div className="flex flex-wrap gap-2 mb-3">
         <Chip active={filter === 'all'} onClick={() => setFilter('all')} label="All changes" count={counts.all} />
         <Chip active={filter === 'review'} onClick={() => setFilter('review')} label="Needs a price review" count={counts.review} tone="warning" />
+        <Chip active={filter === 'reviewed'} onClick={() => setFilter('reviewed')} label="Reviewed" count={counts.reviewed} />
         <Chip active={filter === 'cost_up'} onClick={() => setFilter('cost_up')} label="Cost went up" count={counts.cost_up} />
         <Chip active={filter === 'cost_down'} onClick={() => setFilter('cost_down')} label="Cost went down" count={counts.cost_down} />
       </div>
@@ -209,16 +244,30 @@ export default function PriceChangesPage() {
                       ) : '—'}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {a.atLoss ? (
-                        <Badge tone="danger">Selling at a loss</Badge>
-                      ) : a.needsReview ? (
+                      {a.reviewed ? (
                         <div className="flex flex-col items-end gap-0.5">
-                          <Badge tone="warning">Raise price?</Badge>
-                          {suggestion !== null && suggestion > (r.products?.price ?? 0) && (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-primary-soft text-primary-dark whitespace-nowrap">
+                            <Check size={11} /> Reviewed
+                          </span>
+                          <button onClick={() => setReviewed(r, false)} className="inline-flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink">
+                            <Undo2 size={11} /> Undo
+                          </button>
+                        </div>
+                      ) : a.atLoss || a.needsReview ? (
+                        <div className="flex flex-col items-end gap-1">
+                          {a.atLoss ? <Badge tone="danger">Selling at a loss</Badge> : <Badge tone="warning">Raise price?</Badge>}
+                          {!a.atLoss && suggestion !== null && suggestion > (r.products?.price ?? 0) && (
                             <span className="text-[11px] text-ink-faint whitespace-nowrap">
                               same margin ≈ {formatPeso(suggestion)}
                             </span>
                           )}
+                          <button
+                            onClick={() => setReviewed(r, true)}
+                            title="I've checked this — the price is fine as it is"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline whitespace-nowrap"
+                          >
+                            <Check size={11} /> Mark as reviewed
+                          </button>
                         </div>
                       ) : null}
                     </td>
