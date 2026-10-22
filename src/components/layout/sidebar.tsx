@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   Receipt,
+  TrendingUp,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { cn } from '@/lib/utils/utils' // if you have a cn utility; otherwise use template strings
@@ -49,6 +50,7 @@ const navItems: NavEntry[] = [
     children: [
       { type: 'item', href: '/reports/sales', label: 'Sales', icon: Receipt },
       { type: 'item', href: '/reports/expenses', label: 'Expenses', icon: Wallet },
+      { type: 'item', href: '/reports/price-changes', label: 'Price changes', icon: TrendingUp },
     ],
   },
   { type: 'item', href: '/gcash', label: 'GCash', icon: Smartphone },

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { X, LayoutDashboard, Package, Users, Receipt, Wallet, Smartphone, LogOut } from 'lucide-react'
+import { X, LayoutDashboard, Package, Users, Receipt, Wallet, Smartphone, LogOut, TrendingUp } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
@@ -15,6 +15,7 @@ const LINKS = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/reports/sales', label: 'Sales reports', icon: Receipt },
   { href: '/reports/expenses', label: 'Expenses', icon: Wallet },
+  { href: '/reports/price-changes', label: 'Price changes', icon: TrendingUp },
   { href: '/gcash', label: 'GCash', icon: Smartphone },
 ]
 
