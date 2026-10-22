@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate, manilaMonthStart } from '@/lib/utils/date'
+import { expenseCategoryLabels, type ExpenseCategory } from '@/lib/expense-categories'
 import { toast } from 'sonner'
 import {
   Plus,
@@ -15,13 +16,6 @@ import {
   Filter,
 } from 'lucide-react'
 
-type ExpenseCategory =
-  | 'supplies'
-  | 'utilities'
-  | 'salary'
-  | 'maintenance'
-  | 'food'
-  | 'other'
 
 interface Expense {
   id: string
@@ -33,14 +27,7 @@ interface Expense {
   created_at: string
 }
 
-const categoryLabels: Record<ExpenseCategory, string> = {
-  supplies: 'Supplies',
-  utilities: 'Utilities',
-  salary: 'Salary',
-  maintenance: 'Maintenance',
-  food: 'Food',
-  other: 'Other',
-}
+const categoryLabels = expenseCategoryLabels
 
 const categoryColors: Record<ExpenseCategory, string> = {
   supplies: 'bg-blue-100 text-blue-800',

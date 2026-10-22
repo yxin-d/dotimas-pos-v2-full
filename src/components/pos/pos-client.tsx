@@ -13,16 +13,17 @@ import VoidModal from './void-modal'
 import PriceCheckerModal from './price-checker-modal'
 import CloseDayModal from './close-day-modal'
 import OpenDayModal from './open-day-modal'
+import ExpenseModal from './expense-modal'
 import Receipt from './receipt'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate } from '@/lib/utils/date'
 import CategoryGrid, { ALL_PRODUCTS, UNCATEGORIZED } from './category-grid'
-import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Receipt as ReceiptIcon } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, Receipt as ReceiptIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, PosSession } from '@/types/database'
 
-type ActiveModal = 'checkout' | 'customItem' | 'void' | 'priceChecker' | 'closeDay' | null
+type ActiveModal = 'checkout' | 'customItem' | 'void' | 'priceChecker' | 'closeDay' | 'expense' | null
 
 interface Props {
   // The day the POS is working in — see getCurrentSession(). No staff/shift
@@ -250,6 +251,13 @@ export default function PosClient({ session, categories }: Props) {
             <Scan size={16} />
           </button>
           <button
+            onClick={() => setActiveModal('expense')}
+            title="Add expense (paid from the drawer)"
+            className="p-2 rounded-xl border border-border text-ink-faint hover:text-gold hover:border-gold/40 transition-colors"
+          >
+            <Wallet size={16} />
+          </button>
+          <button
             onClick={() => setActiveModal('void')}
             title="Void a sale"
             className="p-2 rounded-xl border border-border text-ink-faint hover:text-danger hover:border-danger/40 transition-colors"
@@ -382,6 +390,12 @@ export default function PosClient({ session, categories }: Props) {
       {activeModal === 'customItem' && <CustomItemModal onClose={() => setActiveModal(null)} />}
       {activeModal === 'void' && <VoidModal onClose={() => setActiveModal(null)} onDone={() => setActiveModal(null)} />}
       {activeModal === 'priceChecker' && <PriceCheckerModal onClose={() => setActiveModal(null)} />}
+      {activeModal === 'expense' && (
+        <ExpenseModal
+          expenseDate={dayOpen ? session.session_date : manilaDate()}
+          onClose={() => setActiveModal(null)}
+        />
+      )}
       {activeModal === 'closeDay' && (
         <CloseDayModal onClose={() => setActiveModal(null)} onDone={() => { setActiveModal(null); router.refresh() }} />
       )}
