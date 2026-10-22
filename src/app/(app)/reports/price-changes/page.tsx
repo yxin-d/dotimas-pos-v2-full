@@ -80,7 +80,25 @@ export default function PriceChangesPage() {
     return () => { cancelled = true }
   }, [dateFrom, dateTo])
 
-  const analysed = useMemo(() => rows.map(r => ({ r, a: analyse(r) })), [rows])
+  // One row per product per Manila day: the database already merges edits
+  // made on the same day, and this also folds any older duplicates together.
+  // A day that ends where it started (old = new) isn't a change, so it's hidden.
+  const merged = useMemo(() => {
+    const byKey = new Map<string, ChangeRow>()
+    // rows arrive newest first; walk oldest first so "old" = start of day
+    for (const r of [...rows].reverse()) {
+      const key = `${r.product_id ?? r.product_name}|${manilaDate(new Date(r.changed_at))}`
+      const prev = byKey.get(key)
+      byKey.set(key, prev
+        ? { ...r, old_cost: prev.old_cost, old_price: prev.old_price }
+        : r)
+    }
+    return [...byKey.values()]
+      .filter(r => r.old_cost !== r.new_cost || r.old_price !== r.new_price)
+      .sort((a, b) => b.changed_at.localeCompare(a.changed_at))
+  }, [rows])
+
+  const analysed = useMemo(() => merged.map(r => ({ r, a: analyse(r) })), [merged])
 
   const counts = useMemo(() => ({
     all: analysed.length,
@@ -105,7 +123,7 @@ export default function PriceChangesPage() {
       <div className="mb-5">
         <h1 className="text-xl font-bold text-ink">Price changes</h1>
         <p className="text-xs text-ink-faint mt-0.5">
-          Every change to a product&apos;s cost or selling price — from editing, bulk edit or an import.
+          Changes to a product&apos;s cost or selling price — from editing, bulk edit or an import. One row per product per day, showing where it started and where it ended up.
         </p>
       </div>
 
@@ -144,7 +162,7 @@ export default function PriceChangesPage() {
           <div className="py-10 text-center text-sm text-danger">Couldn&apos;t load price changes: {error}</div>
         ) : visible.length === 0 ? (
           <div className="py-10 text-center text-sm text-ink-faint">
-            {rows.length === 0 ? 'No cost or price changes in this period.' : 'Nothing matches this filter.'}
+            {merged.length === 0 ? 'No cost or price changes in this period.' : 'Nothing matches this filter.'}
           </div>
         ) : (
           <table className="w-full text-left min-w-[760px]">
