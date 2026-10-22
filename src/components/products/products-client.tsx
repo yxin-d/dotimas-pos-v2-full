@@ -13,6 +13,19 @@ import ProductPreviewPane from './product-preview-pane'
 import BulkEditModal from './bulk-edit-modal'
 import type { Product, ProductCategory } from '@/types/database'
 
+type StatusFilter = '' | 'active' | 'inactive' | 'low_margin'
+
+// Margin = selling price − cost, and as a % of the selling price.
+// "low" = under 10%, which is where a small cost increase starts to hurt.
+const LOW_MARGIN_PCT = 10
+function marginOf(p: Product) {
+  if (p.price <= 0) return { kind: 'unpriced' as const }
+  if (p.cost <= 0) return { kind: 'no_cost' as const }
+  const amount = p.price - p.cost
+  const pct = (amount / p.price) * 100
+  return { kind: amount <= 0 ? ('loss' as const) : pct < LOW_MARGIN_PCT ? ('low' as const) : ('ok' as const), amount, pct }
+}
+
 interface Props {
   initialProducts: Product[]
   categories: ProductCategory[]
@@ -22,7 +35,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   const [products, setProducts] = useState<Product[]>(initialProducts)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState<string>('')
-  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'inactive'>('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
   const [loading, setLoading] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [previewMode, setPreviewMode] = useState<'edit' | 'create' | null>(null)
@@ -37,11 +50,15 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
     const supabase = createClient()
     let query = supabase.from('products').select('*, product_categories(name)').order('name')
     if (categoryFilter) query = query.eq('category_id', categoryFilter)
-    if (statusFilter) query = query.eq('is_active', statusFilter === 'active')
+    if (statusFilter === 'active' || statusFilter === 'inactive') query = query.eq('is_active', statusFilter === 'active')
     if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%,sku.ilike.%${search}%`)
     const { data, error } = await query
     if (error) toast.error('Failed to load products: ' + error.message)
-    setProducts(data ?? [])
+    // Margin is calculated, not a column, so this filter runs here.
+    const rows = (data ?? []) as Product[]
+    setProducts(statusFilter === 'low_margin'
+      ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
+      : rows)
     setLoading(false)
   }, [search, categoryFilter, statusFilter])
 
@@ -180,10 +197,11 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
           <option value="">All categories</option>
           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as '' | 'active' | 'inactive')} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as StatusFilter)} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
           <option value="">All statuses</option>
           <option value="active">Active only</option>
           <option value="inactive">Inactive only</option>
+          <option value="low_margin">Low margin or loss (under {LOW_MARGIN_PCT}%)</option>
         </select>
         <div className="flex items-center gap-2 bg-primary-soft border border-dashed border-primary rounded-xl px-3 py-2 text-xs font-bold text-primary-dark">
           <Scan size={14} /> Scan to find
@@ -211,7 +229,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                   }}
                   className="accent-primary shrink-0"
                 />
-                Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
+                <span className="flex-1">
+                  Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
+                </span>
+                <span className="shrink-0 w-16 text-right">Stock</span>
+                <span className="shrink-0 w-20 text-right hidden sm:block">Cost</span>
+                <span className="shrink-0 w-20 text-right">Price</span>
+                <span className="shrink-0 w-24 text-right">Margin</span>
               </div>
               {products.map(p => (
                 <button
@@ -234,7 +258,9 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                   </div>
                   {!p.is_active && <span className="text-[10px] font-bold text-ink-faint bg-surface-sunken px-2 py-0.5 rounded-full shrink-0">Inactive</span>}
                   <span className="text-xs text-ink-faint tabular shrink-0 w-16 text-right">{p.stocks} left</span>
+                  <span className="text-xs text-ink-soft tabular shrink-0 w-20 text-right hidden sm:block">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
                   <span className="text-sm font-bold text-gold tabular shrink-0 w-20 text-right">{formatPeso(p.price)}</span>
+                  <MarginCell product={p} />
                 </button>
               ))}
             </div>
@@ -280,5 +306,18 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
         />
       )}
     </div>
+  )
+}
+
+function MarginCell({ product }: { product: Product }) {
+  const m = marginOf(product)
+  if (m.kind === 'unpriced') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No price</span>
+  if (m.kind === 'no_cost') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No cost set</span>
+  const color = m.kind === 'loss' ? 'text-danger' : m.kind === 'low' ? 'text-warning' : 'text-primary'
+  return (
+    <span className={`shrink-0 w-24 text-right tabular leading-tight ${color}`}>
+      <span className="block text-sm font-semibold">{formatPeso(m.amount)}</span>
+      <span className="block text-[11px]">{m.kind === 'loss' ? 'loss' : `${m.pct.toFixed(0)}%`}</span>
+    </span>
   )
 }
