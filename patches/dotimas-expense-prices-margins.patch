@@ -1,0 +1,537 @@
+From 0f4dae1b8c7c3f2da9a783f4a84497e3fd3c316f Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Thu, 22 Oct 2026 10:16:26 +0800
+Subject: [PATCH 1/3] Add expense from the POS; make expense edit/delete
+ actually work
+
+- POS top bar: "Add expense" (wallet icon). The expense is dated to the
+  open business day, so close-day subtracts it from the right drawer
+- Migration 0004: expenses were insert-only (no UPDATE/DELETE grant or
+  policy), so Edit and Delete on the Expenses page always failed
+- Expense categories moved to lib/expense-categories.ts, shared by both
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ lib/expense-categories.ts                     |  11 ++
+ src/app/(app)/reports/expenses/page.tsx       |  17 +--
+ src/components/pos/expense-modal.tsx          | 124 ++++++++++++++++++
+ src/components/pos/pos-client.tsx             |  18 ++-
+ .../migrations/0004_expense_edit_delete.sql   |  12 ++
+ 5 files changed, 165 insertions(+), 17 deletions(-)
+ create mode 100644 lib/expense-categories.ts
+ create mode 100644 src/components/pos/expense-modal.tsx
+ create mode 100644 supabase/migrations/0004_expense_edit_delete.sql
+
+diff --git a/lib/expense-categories.ts b/lib/expense-categories.ts
+new file mode 100644
+index 0000000..0a1deda
+--- /dev/null
++++ b/lib/expense-categories.ts
+@@ -0,0 +1,11 @@
++// Shared by the Expenses page and the POS "Add expense" modal.
++export type ExpenseCategory = 'supplies' | 'utilities' | 'salary' | 'maintenance' | 'food' | 'other'
++
++export const expenseCategoryLabels: Record<ExpenseCategory, string> = {
++  supplies: 'Supplies',
++  utilities: 'Utilities',
++  salary: 'Salary',
++  maintenance: 'Maintenance',
++  food: 'Food',
++  other: 'Other',
++}
+diff --git a/src/app/(app)/reports/expenses/page.tsx b/src/app/(app)/reports/expenses/page.tsx
+index e9ed4ab..419b4d6 100644
+--- a/src/app/(app)/reports/expenses/page.tsx
++++ b/src/app/(app)/reports/expenses/page.tsx
+@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
+ import { createClient } from '@/lib/supabase/client'
+ import { formatPeso, formatDate } from '@/lib/utils/currency'
+ import { manilaDate, manilaMonthStart } from '@/lib/utils/date'
++import { expenseCategoryLabels, type ExpenseCategory } from '@/lib/expense-categories'
+ import { toast } from 'sonner'
+ import {
+   Plus,
+@@ -15,13 +16,6 @@ import {
+   Filter,
+ } from 'lucide-react'
+ 
+-type ExpenseCategory =
+-  | 'supplies'
+-  | 'utilities'
+-  | 'salary'
+-  | 'maintenance'
+-  | 'food'
+-  | 'other'
+ 
+ interface Expense {
+   id: string
+@@ -33,14 +27,7 @@ interface Expense {
+   created_at: string
+ }
+ 
+-const categoryLabels: Record<ExpenseCategory, string> = {
+-  supplies: 'Supplies',
+-  utilities: 'Utilities',
+-  salary: 'Salary',
+-  maintenance: 'Maintenance',
+-  food: 'Food',
+-  other: 'Other',
+-}
++const categoryLabels = expenseCategoryLabels
+ 
+ const categoryColors: Record<ExpenseCategory, string> = {
+   supplies: 'bg-blue-100 text-blue-800',
+diff --git a/src/components/pos/expense-modal.tsx b/src/components/pos/expense-modal.tsx
+new file mode 100644
+index 0000000..220fc1a
+--- /dev/null
++++ b/src/components/pos/expense-modal.tsx
+@@ -0,0 +1,124 @@
++'use client'
++
++import { useState } from 'react'
++import { toast } from 'sonner'
++import { Wallet } from 'lucide-react'
++import { createClient } from '@/lib/supabase/client'
++import { formatDate } from '@/lib/utils/currency'
++import { expenseCategoryLabels, type ExpenseCategory } from '@/lib/expense-categories'
++
++interface Props {
++  // The business day the expense belongs to. When a day is open this is that
++  // day's date (even if it was opened yesterday and not yet closed), so
++  // close-day subtracts it from the drawer it actually came out of.
++  expenseDate: string
++  onClose: () => void
++}
++
++export default function ExpenseModal({ expenseDate, onClose }: Props) {
++  const [description, setDescription] = useState('')
++  const [amount, setAmount] = useState('')
++  const [category, setCategory] = useState<ExpenseCategory>('supplies')
++  const [notes, setNotes] = useState('')
++  const [saving, setSaving] = useState(false)
++
++  async function handleSave() {
++    const value = parseFloat(amount)
++    if (!description.trim()) {
++      toast.error('What was it for?')
++      return
++    }
++    if (isNaN(value) || value <= 0) {
++      toast.error('Enter a valid amount')
++      return
++    }
++    setSaving(true)
++    const supabase = createClient()
++    const { error } = await supabase.from('expenses').insert({
++      description: description.trim(),
++      category,
++      amount: value,
++      expense_date: expenseDate,
++      notes: notes.trim() || null,
++    })
++    setSaving(false)
++    if (error) {
++      toast.error(`Couldn't save the expense: ${error.message}`)
++      return
++    }
++    toast.success('Expense recorded')
++    onClose()
++  }
++
++  return (
++    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={() => !saving && onClose()}>
++      <div className="w-full max-w-sm bg-surface rounded-2xl border border-border p-6 flex flex-col gap-4" onClick={e => e.stopPropagation()}>
++        <div className="flex items-center gap-3">
++          <div className="w-10 h-10 rounded-full bg-gold-soft text-gold flex items-center justify-center">
++            <Wallet size={18} />
++          </div>
++          <div>
++            <h2 className="font-bold text-ink">Add expense</h2>
++            <p className="text-xs text-ink-faint">Paid from the drawer · counted for {formatDate(expenseDate)}</p>
++          </div>
++        </div>
++
++        <div className="flex flex-col gap-1.5">
++          <label className="text-xs font-semibold text-ink-soft">What was it for?</label>
++          <input
++            autoFocus
++            value={description}
++            onChange={e => setDescription(e.target.value)}
++            placeholder="e.g. Ice, LPG, delivery"
++            className="w-full rounded-xl border border-border bg-canvas px-4 py-2.5 text-sm text-ink outline-none focus-visible:border-primary"
++          />
++        </div>
++
++        <div className="flex gap-3">
++          <div className="flex-1 flex flex-col gap-1.5">
++            <label className="text-xs font-semibold text-ink-soft">Amount</label>
++            <input
++              type="number"
++              inputMode="decimal"
++              value={amount}
++              onChange={e => setAmount(e.target.value)}
++              onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
++              placeholder="0.00"
++              className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-2.5 text-lg font-bold text-ink outline-none focus-visible:border-primary"
++            />
++          </div>
++          <div className="flex-1 flex flex-col gap-1.5">
++            <label className="text-xs font-semibold text-ink-soft">Category</label>
++            <select
++              value={category}
++              onChange={e => setCategory(e.target.value as ExpenseCategory)}
++              className="w-full rounded-xl border border-border bg-canvas px-3 py-3 text-sm text-ink outline-none focus-visible:border-primary"
++            >
++              {Object.entries(expenseCategoryLabels).map(([key, label]) => (
++                <option key={key} value={key}>{label}</option>
++              ))}
++            </select>
++          </div>
++        </div>
++
++        <div className="flex flex-col gap-1.5">
++          <label className="text-xs font-semibold text-ink-soft">Notes (optional)</label>
++          <input
++            value={notes}
++            onChange={e => setNotes(e.target.value)}
++            className="w-full rounded-xl border border-border bg-canvas px-4 py-2.5 text-sm text-ink outline-none focus-visible:border-primary"
++          />
++        </div>
++
++        <div className="flex gap-2">
++          <button onClick={onClose} disabled={saving} className="flex-1 rounded-xl border border-border text-ink-soft font-semibold py-3">
++            Cancel
++          </button>
++          <button onClick={handleSave} disabled={saving} className="flex-1 rounded-xl bg-primary text-white font-bold py-3 disabled:opacity-60">
++            {saving ? 'Saving…' : 'Save expense'}
++          </button>
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/src/components/pos/pos-client.tsx b/src/components/pos/pos-client.tsx
+index 53ec39f..e1c7785 100644
+--- a/src/components/pos/pos-client.tsx
++++ b/src/components/pos/pos-client.tsx
+@@ -13,16 +13,17 @@ import VoidModal from './void-modal'
+ import PriceCheckerModal from './price-checker-modal'
+ import CloseDayModal from './close-day-modal'
+ import OpenDayModal from './open-day-modal'
++import ExpenseModal from './expense-modal'
+ import Receipt from './receipt'
+ import { formatPeso, formatDate } from '@/lib/utils/currency'
+ import { manilaDate } from '@/lib/utils/date'
+ import CategoryGrid, { ALL_PRODUCTS, UNCATEGORIZED } from './category-grid'
+-import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Receipt as ReceiptIcon } from 'lucide-react'
++import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, Receipt as ReceiptIcon } from 'lucide-react'
+ import { toast } from 'sonner'
+ import PosNavDrawer from './pos-nav-drawer'
+ import type { Product, ProductCategory, PosSession } from '@/types/database'
+ 
+-type ActiveModal = 'checkout' | 'customItem' | 'void' | 'priceChecker' | 'closeDay' | null
++type ActiveModal = 'checkout' | 'customItem' | 'void' | 'priceChecker' | 'closeDay' | 'expense' | null
+ 
+ interface Props {
+   // The day the POS is working in — see getCurrentSession(). No staff/shift
+@@ -249,6 +250,13 @@ export default function PosClient({ session, categories }: Props) {
+           >
+             <Scan size={16} />
+           </button>
++          <button
++            onClick={() => setActiveModal('expense')}
++            title="Add expense (paid from the drawer)"
++            className="p-2 rounded-xl border border-border text-ink-faint hover:text-gold hover:border-gold/40 transition-colors"
++          >
++            <Wallet size={16} />
++          </button>
+           <button
+             onClick={() => setActiveModal('void')}
+             title="Void a sale"
+@@ -382,6 +390,12 @@ export default function PosClient({ session, categories }: Props) {
+       {activeModal === 'customItem' && <CustomItemModal onClose={() => setActiveModal(null)} />}
+       {activeModal === 'void' && <VoidModal onClose={() => setActiveModal(null)} onDone={() => setActiveModal(null)} />}
+       {activeModal === 'priceChecker' && <PriceCheckerModal onClose={() => setActiveModal(null)} />}
++      {activeModal === 'expense' && (
++        <ExpenseModal
++          expenseDate={dayOpen ? session.session_date : manilaDate()}
++          onClose={() => setActiveModal(null)}
++        />
++      )}
+       {activeModal === 'closeDay' && (
+         <CloseDayModal onClose={() => setActiveModal(null)} onDone={() => { setActiveModal(null); router.refresh() }} />
+       )}
+diff --git a/supabase/migrations/0004_expense_edit_delete.sql b/supabase/migrations/0004_expense_edit_delete.sql
+new file mode 100644
+index 0000000..178e826
+--- /dev/null
++++ b/supabase/migrations/0004_expense_edit_delete.sql
+@@ -0,0 +1,12 @@
++-- ============================================================================
++-- Let signed-in users edit and delete expenses.
++--
++-- The Expenses page has always had Edit and Delete buttons, but the table was
++-- created insert-only (no UPDATE/DELETE grant or policy), so both silently
++-- failed with a permission error. An expense is a plain record the owner
++-- manages, unlike sales (which are corrected by voiding), so allow both.
++-- ============================================================================
++
++create policy "expenses update" on public.expenses for update to authenticated using (true) with check (true);
++create policy "expenses delete" on public.expenses for delete to authenticated using (true);
++grant update, delete on public.expenses to authenticated;
+-- 
+2.43.0
+
+
+From 52fcdd5b26dd0106b975023da8c8ce8e99d6aa6e Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Thu, 22 Oct 2026 10:28:55 +0800
+Subject: [PATCH 2/3] Price changes: one row per product per day
+
+Several edits to the same product on the same Manila day now update that
+day's row (start-of-day values kept, latest values shown) instead of adding
+a row per edit. The report also folds same-day rows together and hides days
+that ended where they started. Migration 0005 (already applied live).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ src/app/(app)/reports/price-changes/page.tsx  | 24 ++++++++--
+ .../0005_price_changes_one_row_per_day.sql    | 44 +++++++++++++++++++
+ 2 files changed, 65 insertions(+), 3 deletions(-)
+ create mode 100644 supabase/migrations/0005_price_changes_one_row_per_day.sql
+
+diff --git a/src/app/(app)/reports/price-changes/page.tsx b/src/app/(app)/reports/price-changes/page.tsx
+index 903ca94..a52c60f 100644
+--- a/src/app/(app)/reports/price-changes/page.tsx
++++ b/src/app/(app)/reports/price-changes/page.tsx
+@@ -80,7 +80,25 @@ export default function PriceChangesPage() {
+     return () => { cancelled = true }
+   }, [dateFrom, dateTo])
+ 
+-  const analysed = useMemo(() => rows.map(r => ({ r, a: analyse(r) })), [rows])
++  // One row per product per Manila day: the database already merges edits
++  // made on the same day, and this also folds any older duplicates together.
++  // A day that ends where it started (old = new) isn't a change, so it's hidden.
++  const merged = useMemo(() => {
++    const byKey = new Map<string, ChangeRow>()
++    // rows arrive newest first; walk oldest first so "old" = start of day
++    for (const r of [...rows].reverse()) {
++      const key = `${r.product_id ?? r.product_name}|${manilaDate(new Date(r.changed_at))}`
++      const prev = byKey.get(key)
++      byKey.set(key, prev
++        ? { ...r, old_cost: prev.old_cost, old_price: prev.old_price }
++        : r)
++    }
++    return [...byKey.values()]
++      .filter(r => r.old_cost !== r.new_cost || r.old_price !== r.new_price)
++      .sort((a, b) => b.changed_at.localeCompare(a.changed_at))
++  }, [rows])
++
++  const analysed = useMemo(() => merged.map(r => ({ r, a: analyse(r) })), [merged])
+ 
+   const counts = useMemo(() => ({
+     all: analysed.length,
+@@ -105,7 +123,7 @@ export default function PriceChangesPage() {
+       <div className="mb-5">
+         <h1 className="text-xl font-bold text-ink">Price changes</h1>
+         <p className="text-xs text-ink-faint mt-0.5">
+-          Every change to a product&apos;s cost or selling price — from editing, bulk edit or an import.
++          Changes to a product&apos;s cost or selling price — from editing, bulk edit or an import. One row per product per day, showing where it started and where it ended up.
+         </p>
+       </div>
+ 
+@@ -144,7 +162,7 @@ export default function PriceChangesPage() {
+           <div className="py-10 text-center text-sm text-danger">Couldn&apos;t load price changes: {error}</div>
+         ) : visible.length === 0 ? (
+           <div className="py-10 text-center text-sm text-ink-faint">
+-            {rows.length === 0 ? 'No cost or price changes in this period.' : 'Nothing matches this filter.'}
++            {merged.length === 0 ? 'No cost or price changes in this period.' : 'Nothing matches this filter.'}
+           </div>
+         ) : (
+           <table className="w-full text-left min-w-[760px]">
+diff --git a/supabase/migrations/0005_price_changes_one_row_per_day.sql b/supabase/migrations/0005_price_changes_one_row_per_day.sql
+new file mode 100644
+index 0000000..d663061
+--- /dev/null
++++ b/supabase/migrations/0005_price_changes_one_row_per_day.sql
+@@ -0,0 +1,44 @@
++-- ============================================================================
++-- Price-change history: one row per product per business day.
++--
++-- Several edits to the same product on the same (Manila) day are merged into
++-- that day's row: old_cost/old_price stay as they were at the start of the
++-- day, new_cost/new_price follow the latest edit. A day where the product
++-- ends up back where it started keeps its row (old = new); the report hides
++-- those, since nothing actually changed.
++-- ============================================================================
++
++create or replace function public.log_product_price_change()
++returns trigger language plpgsql security definer set search_path = public as $$
++declare
++  v_today_id uuid;
++begin
++  select id into v_today_id
++  from public.product_price_changes
++  where product_id = new.id
++    -- start of today in Manila, as a timestamptz
++    and changed_at >= (public.business_date()::timestamp at time zone 'Asia/Manila')
++  order by changed_at desc
++  limit 1
++  for update;
++
++  if v_today_id is not null then
++    update public.product_price_changes
++    set new_cost = new.cost,
++        new_price = new.price,
++        product_name = new.name,
++        volume = new.volume,
++        category_id = new.category_id,
++        changed_at = now()
++    where id = v_today_id;
++  else
++    insert into public.product_price_changes
++      (product_id, product_name, volume, category_id, old_cost, new_cost, old_price, new_price)
++    values
++      (new.id, new.name, new.volume, new.category_id, old.cost, new.cost, old.price, new.price);
++  end if;
++  return new;
++end;
++$$;
++
++revoke execute on function public.log_product_price_change() from public, anon, authenticated;
+-- 
+2.43.0
+
+
+From 3ea933b5c0e74b41c0f291da770b1115191b2555 Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Thu, 22 Oct 2026 10:52:00 +0800
+Subject: [PATCH 3/3] Products list: show cost and margin, filter low-margin
+ items
+
+Each row now shows cost and margin (price - cost, and % of price) next to
+stock and price: green when healthy, amber under 10%, red when selling at
+or below cost; "No price" / "No cost set" when one is missing. The status
+filter gains "Low margin or loss". Cost hides on narrow screens.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ src/components/products/products-client.tsx | 51 ++++++++++++++++++---
+ 1 file changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/src/components/products/products-client.tsx b/src/components/products/products-client.tsx
+index be32acf..c5b817d 100644
+--- a/src/components/products/products-client.tsx
++++ b/src/components/products/products-client.tsx
+@@ -13,6 +13,19 @@ import ProductPreviewPane from './product-preview-pane'
+ import BulkEditModal from './bulk-edit-modal'
+ import type { Product, ProductCategory } from '@/types/database'
+ 
++type StatusFilter = '' | 'active' | 'inactive' | 'low_margin'
++
++// Margin = selling price − cost, and as a % of the selling price.
++// "low" = under 10%, which is where a small cost increase starts to hurt.
++const LOW_MARGIN_PCT = 10
++function marginOf(p: Product) {
++  if (p.price <= 0) return { kind: 'unpriced' as const }
++  if (p.cost <= 0) return { kind: 'no_cost' as const }
++  const amount = p.price - p.cost
++  const pct = (amount / p.price) * 100
++  return { kind: amount <= 0 ? ('loss' as const) : pct < LOW_MARGIN_PCT ? ('low' as const) : ('ok' as const), amount, pct }
++}
++
+ interface Props {
+   initialProducts: Product[]
+   categories: ProductCategory[]
+@@ -22,7 +35,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+   const [products, setProducts] = useState<Product[]>(initialProducts)
+   const [search, setSearch] = useState('')
+   const [categoryFilter, setCategoryFilter] = useState<string>('')
+-  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'inactive'>('')
++  const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
+   const [loading, setLoading] = useState(false)
+   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
+   const [previewMode, setPreviewMode] = useState<'edit' | 'create' | null>(null)
+@@ -37,11 +50,15 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+     const supabase = createClient()
+     let query = supabase.from('products').select('*, product_categories(name)').order('name')
+     if (categoryFilter) query = query.eq('category_id', categoryFilter)
+-    if (statusFilter) query = query.eq('is_active', statusFilter === 'active')
++    if (statusFilter === 'active' || statusFilter === 'inactive') query = query.eq('is_active', statusFilter === 'active')
+     if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%,sku.ilike.%${search}%`)
+     const { data, error } = await query
+     if (error) toast.error('Failed to load products: ' + error.message)
+-    setProducts(data ?? [])
++    // Margin is calculated, not a column, so this filter runs here.
++    const rows = (data ?? []) as Product[]
++    setProducts(statusFilter === 'low_margin'
++      ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
++      : rows)
+     setLoading(false)
+   }, [search, categoryFilter, statusFilter])
+ 
+@@ -180,10 +197,11 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+           <option value="">All categories</option>
+           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+         </select>
+-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as '' | 'active' | 'inactive')} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
++        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as StatusFilter)} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
+           <option value="">All statuses</option>
+           <option value="active">Active only</option>
+           <option value="inactive">Inactive only</option>
++          <option value="low_margin">Low margin or loss (under {LOW_MARGIN_PCT}%)</option>
+         </select>
+         <div className="flex items-center gap-2 bg-primary-soft border border-dashed border-primary rounded-xl px-3 py-2 text-xs font-bold text-primary-dark">
+           <Scan size={14} /> Scan to find
+@@ -211,7 +229,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+                   }}
+                   className="accent-primary shrink-0"
+                 />
+-                Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
++                <span className="flex-1">
++                  Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
++                </span>
++                <span className="shrink-0 w-16 text-right">Stock</span>
++                <span className="shrink-0 w-20 text-right hidden sm:block">Cost</span>
++                <span className="shrink-0 w-20 text-right">Price</span>
++                <span className="shrink-0 w-24 text-right">Margin</span>
+               </div>
+               {products.map(p => (
+                 <button
+@@ -234,7 +258,9 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+                   </div>
+                   {!p.is_active && <span className="text-[10px] font-bold text-ink-faint bg-surface-sunken px-2 py-0.5 rounded-full shrink-0">Inactive</span>}
+                   <span className="text-xs text-ink-faint tabular shrink-0 w-16 text-right">{p.stocks} left</span>
++                  <span className="text-xs text-ink-soft tabular shrink-0 w-20 text-right hidden sm:block">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
+                   <span className="text-sm font-bold text-gold tabular shrink-0 w-20 text-right">{formatPeso(p.price)}</span>
++                  <MarginCell product={p} />
+                 </button>
+               ))}
+             </div>
+@@ -281,4 +307,17 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+       )}
+     </div>
+   )
+-}
+\ No newline at end of file
++}
++
++function MarginCell({ product }: { product: Product }) {
++  const m = marginOf(product)
++  if (m.kind === 'unpriced') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No price</span>
++  if (m.kind === 'no_cost') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No cost set</span>
++  const color = m.kind === 'loss' ? 'text-danger' : m.kind === 'low' ? 'text-warning' : 'text-primary'
++  return (
++    <span className={`shrink-0 w-24 text-right tabular leading-tight ${color}`}>
++      <span className="block text-sm font-semibold">{formatPeso(m.amount)}</span>
++      <span className="block text-[11px]">{m.kind === 'loss' ? 'loss' : `${m.pct.toFixed(0)}%`}</span>
++    </span>
++  )
++}
+-- 
+2.43.0
+

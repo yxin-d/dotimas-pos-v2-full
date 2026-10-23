@@ -1,0 +1,1271 @@
+From 7d509ef69aa5463d1c58cfd8c125e64d331c2686 Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Wed, 21 Oct 2026 21:13:12 +0800
+Subject: [PATCH 1/2] Import: skip non-product tabs, keep both items when a
+ barcode is reused
+
+Tabs with no product names (Review, Product Report, ...) no longer become
+empty categories. When two different products share one barcode in the file,
+the later one is imported without the barcode and flagged, instead of
+overwriting the first (in this import or on a re-import).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ src/app/(app)/products/action.ts | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/(app)/products/action.ts b/src/app/(app)/products/action.ts
+index 77cf83b..5dda7b0 100644
+--- a/src/app/(app)/products/action.ts
++++ b/src/app/(app)/products/action.ts
+@@ -266,12 +266,20 @@ export async function importProducts(formData: FormData): Promise<ImportResult>
+   const toInsert = new Map<string, Pending>()
+   const toUpdate = new Map<string, Pending>() // key = existing product id
+   const newByBarcode = new Map<string, string>()
++  const barcodeOwner = new Map<string, { label: string; name: string; volume: string; display: string }>()
+   const newBySku = new Map<string, string>()
+ 
+   for (const sheetName of workbook.SheetNames) {
+     const rawRows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName])
+     if (rawRows.length === 0) continue
+ 
++    // Notes/report tabs (e.g. "Review", "Product Report") have no product
++    // names at all. Skip them entirely so they don't become empty categories.
++    if (!rawRows.some(r => normalizeRow(r).name)) {
++      skippedRows.push(`[${sheetName}] no "name" column with values — whole tab ignored (not a product sheet)`)
++      continue
++    }
++
+     const categoryId = await getOrCreateCategoryId(sheetName)
+ 
+     for (const [index, rawRow] of rawRows.entries()) {
+@@ -287,7 +295,21 @@ export async function importProducts(formData: FormData): Promise<ImportResult>
+       const hasPrice = row.price !== undefined && row.price >= 0
+       if (!hasPrice) results.missing_price++
+ 
+-      const barcode = row.barcode || null
++      // Two DIFFERENT products (name or volume differ) sharing one barcode in
++      // the file is almost always a typo. Keep both instead of letting the
++      // later row overwrite the earlier one: the later row loses the barcode,
++      // and the result says so. The same item listed twice is left alone and
++      // simply merges below.
++      let barcode = row.barcode || null
++      if (barcode) {
++        const owner = barcodeOwner.get(barcode)
++        if (owner && (owner.name !== norm(row.name) || owner.volume !== norm(row.volume))) {
++          skippedRows.push(`${label}: barcode ${barcode} is also on ${owner.label} ("${owner.display}") — imported "${row.name}" WITHOUT a barcode; fix it in the file`)
++          barcode = null
++        } else if (!owner) {
++          barcodeOwner.set(barcode, { label, name: norm(row.name), volume: norm(row.volume), display: row.name })
++        }
++      }
+       const existingId =
+         (barcode && byBarcode.get(barcode)) ||
+         (row.sku && bySku.get(row.sku)) ||
+-- 
+2.43.0
+
+
+From 69a7604d6ab637d2ff1c6a31049b123fe565de7c Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Wed, 21 Oct 2026 22:19:21 +0800
+Subject: [PATCH 2/2] Product/customer delete, customer edit, credit
+ statements, fix blank receipt prints
+
+- Products: delete from the edit pane or in bulk (with confirmation); past
+  sales keep their own copy of the name and price
+- Customers: edit name/phone/credit limit; delete via delete_customer(),
+  which refuses while they owe money and archives (hides, keeps history)
+  anyone with credit or sales history; archived filter + restore
+- Customer page: print an A4 credit statement (or save as PDF) and download
+  it as Excel, for customers who want a copy
+- Receipt printing was blank: the print CSS used display:none on every top
+  level element, which also hid the receipt inside them. Switched to
+  visibility so only the receipt prints, on one page.
+- Migration 0002_customer_archive.sql (archived_at, delete_customer, and no
+  new credit for archived customers)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ lib/utils/statement.ts                        | 142 ++++++++
+ src/app/(app)/customers/[id]/credit/page.tsx  | 309 ++++++++++++++----
+ src/app/(app)/customers/action.ts             |  50 ++-
+ src/app/(app)/customers/page.tsx              |  90 ++---
+ src/app/(app)/products/action.ts              |  25 ++
+ src/app/globals.css                           |  39 ++-
+ src/components/pos/customer-picker.tsx        |   4 +-
+ .../products/product-preview-pane.tsx         |  49 ++-
+ src/components/products/products-client.tsx   |  60 +++-
+ supabase/migrations/0002_customer_archive.sql | 100 ++++++
+ types/database.ts                             |   1 +
+ 11 files changed, 749 insertions(+), 120 deletions(-)
+ create mode 100644 lib/utils/statement.ts
+ create mode 100644 supabase/migrations/0002_customer_archive.sql
+
+diff --git a/lib/utils/statement.ts b/lib/utils/statement.ts
+new file mode 100644
+index 0000000..3db2fcd
+--- /dev/null
++++ b/lib/utils/statement.ts
+@@ -0,0 +1,142 @@
++// Customer credit statement — a copy of a customer's ledger to hand over or
++// send them. Two formats:
++//   * printStatement: opens a self-contained A4 page and the print dialog
++//     ("Save as PDF" works there too). It's a separate window on purpose, so
++//     it isn't affected by the app's receipt-printer (80mm) print styles.
++//   * downloadStatementXlsx: an Excel file of the same rows.
++
++import { formatPeso, formatDate, todayPH } from '@/lib/utils/currency'
++
++export interface StatementCustomer {
++  name: string
++  phone: string | null
++  credit_balance: number
++}
++
++export interface StatementEntry {
++  entry_type: string
++  amount: number
++  running_balance: number
++  description: string | null
++  created_at: string
++}
++
++const TYPE_LABEL: Record<string, string> = {
++  credit_given: 'Credit (utang)',
++  payment_made: 'Payment',
++  opening_balance: 'Opening balance',
++}
++
++function escapeHtml(s: string): string {
++  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
++}
++
++/** Oldest first, the way a statement reads. */
++function chronological(entries: StatementEntry[]): StatementEntry[] {
++  return [...entries].sort((a, b) => a.created_at.localeCompare(b.created_at))
++}
++
++function fileSafe(s: string): string {
++  return s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'customer'
++}
++
++export function printStatement(customer: StatementCustomer, entries: StatementEntry[], storeName: string): boolean {
++  const rows = chronological(entries)
++  const totalCredit = rows.filter(r => r.entry_type !== 'payment_made').reduce((s, r) => s + r.amount, 0)
++  const totalPaid = rows.filter(r => r.entry_type === 'payment_made').reduce((s, r) => s + r.amount, 0)
++
++  const body = rows.length === 0
++    ? `<tr><td colspan="5" class="empty">No transactions yet.</td></tr>`
++    : rows.map(r => `
++        <tr>
++          <td>${escapeHtml(formatDate(r.created_at, true))}</td>
++          <td>${escapeHtml(TYPE_LABEL[r.entry_type] ?? r.entry_type)}</td>
++          <td class="num ${r.entry_type === 'payment_made' ? 'paid' : 'owed'}">${r.entry_type === 'payment_made' ? '−' : '+'}${escapeHtml(formatPeso(r.amount))}</td>
++          <td class="num">${escapeHtml(formatPeso(r.running_balance))}</td>
++          <td>${escapeHtml(r.description ?? '')}</td>
++        </tr>`).join('')
++
++  const html = `<!doctype html>
++<html><head><meta charset="utf-8">
++<title>Statement — ${escapeHtml(customer.name)}</title>
++<style>
++  @page { size: A4; margin: 16mm; }
++  * { box-sizing: border-box; }
++  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1a1a1a; font-size: 12px; margin: 0; padding: 24px; }
++  h1 { font-size: 18px; margin: 0; }
++  .muted { color: #666; }
++  header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0B6B57; padding-bottom: 12px; margin-bottom: 16px; }
++  .summary { display: flex; gap: 24px; margin-bottom: 16px; }
++  .summary div { border: 1px solid #ddd; border-radius: 8px; padding: 8px 12px; }
++  .summary b { display: block; font-size: 15px; margin-top: 2px; }
++  .balance b { color: #A97328; }
++  table { width: 100%; border-collapse: collapse; }
++  th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #666; border-bottom: 1px solid #ccc; padding: 6px 8px; }
++  td { padding: 6px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
++  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
++  th.num { text-align: right; }
++  .paid { color: #0B6B57; }
++  .owed { color: #A97328; }
++  .empty { text-align: center; color: #888; padding: 24px; }
++  footer { margin-top: 24px; font-size: 10px; color: #888; }
++  @media print { body { padding: 0; } }
++</style></head>
++<body>
++  <header>
++    <div>
++      <h1>${escapeHtml(storeName)}</h1>
++      <div class="muted">Customer credit statement</div>
++    </div>
++    <div style="text-align:right">
++      <div><b>${escapeHtml(customer.name)}</b></div>
++      ${customer.phone ? `<div class="muted">${escapeHtml(customer.phone)}</div>` : ''}
++      <div class="muted">As of ${escapeHtml(formatDate(new Date().toISOString(), true))}</div>
++    </div>
++  </header>
++  <div class="summary">
++    <div>Total credit<b>${escapeHtml(formatPeso(totalCredit))}</b></div>
++    <div>Total paid<b>${escapeHtml(formatPeso(totalPaid))}</b></div>
++    <div class="balance">Balance due<b>${escapeHtml(formatPeso(customer.credit_balance))}</b></div>
++  </div>
++  <table>
++    <thead><tr><th>Date</th><th>Type</th><th class="num">Amount</th><th class="num">Balance after</th><th>Note</th></tr></thead>
++    <tbody>${body}</tbody>
++  </table>
++  <footer>Please check this statement and let us know if anything looks wrong.</footer>
++  <script>window.onload = function () { window.print(); };</script>
++</body></html>`
++
++  const win = window.open('', '_blank')
++  if (!win) return false // pop-up blocked
++  win.document.open()
++  win.document.write(html)
++  win.document.close()
++  return true
++}
++
++export async function downloadStatementXlsx(customer: StatementCustomer, entries: StatementEntry[], storeName: string) {
++  const XLSX = await import('xlsx')
++  const rows = chronological(entries)
++  const aoa: (string | number)[][] = [
++    [storeName],
++    ['Customer credit statement'],
++    ['Customer', customer.name],
++    ['Phone', customer.phone ?? ''],
++    ['As of', formatDate(new Date().toISOString(), true)],
++    ['Balance due', customer.credit_balance],
++    [],
++    ['Date', 'Type', 'Amount', 'Balance after', 'Note'],
++    ...rows.map(r => [
++      formatDate(r.created_at, true),
++      TYPE_LABEL[r.entry_type] ?? r.entry_type,
++      r.entry_type === 'payment_made' ? -r.amount : r.amount,
++      r.running_balance,
++      r.description ?? '',
++    ]),
++  ]
++  const ws = XLSX.utils.aoa_to_sheet(aoa)
++  ws['!cols'] = [{ wch: 22 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 36 }]
++  const wb = XLSX.utils.book_new()
++  XLSX.utils.book_append_sheet(wb, ws, 'Statement')
++  XLSX.writeFile(wb, `statement-${fileSafe(customer.name)}-${todayPH()}.xlsx`)
++}
+diff --git a/src/app/(app)/customers/[id]/credit/page.tsx b/src/app/(app)/customers/[id]/credit/page.tsx
+index 149c607..f80b5ed 100644
+--- a/src/app/(app)/customers/[id]/credit/page.tsx
++++ b/src/app/(app)/customers/[id]/credit/page.tsx
+@@ -1,20 +1,18 @@
+ 'use client';
+ 
+-import { useParams } from 'next/navigation';
+-import { useEffect, useState } from 'react';
++import { useParams, useRouter } from 'next/navigation';
++import { useCallback, useEffect, useState } from 'react';
++import Link from 'next/link';
+ import { createClient } from '@/lib/supabase/client';
+ import { formatPeso, formatDate } from '@/lib/utils/currency';
++import { printStatement, downloadStatementXlsx } from '@/lib/utils/statement';
+ import { toast } from 'sonner';
++import { ArrowLeft, Pencil, Trash2, Printer, FileDown, Archive, RotateCcw } from 'lucide-react';
+ import Input from '@/src/components/ui/input';
+ import Button from '@/src/components/ui/button';
+-import { recordCreditChange } from '../../action';
+-
+-interface Customer {
+-  id: string;
+-  name: string;
+-  phone: string | null;
+-  credit_balance: number;
+-}
++import Modal from '@/src/components/ui/modal';
++import { recordCreditChange, updateCustomer, deleteCustomer, restoreCustomer } from '../../action';
++import type { Customer } from '@/types/database';
+ 
+ interface LedgerRow {
+   id: string;
+@@ -29,62 +27,56 @@ type Mode = 'payment_made' | 'credit_given';
+ 
+ export default function CustomerCreditPage() {
+   const { id } = useParams<{ id: string }>();
++  const router = useRouter();
+   const [customer, setCustomer] = useState<Customer | null>(null);
++  const [notFound, setNotFound] = useState(false);
+   const [ledger, setLedger] = useState<LedgerRow[]>([]);
++  const [storeName, setStoreName] = useState('Dotimas Store');
+   const [mode, setMode] = useState<Mode>('payment_made');
+   const [amount, setAmount] = useState('');
+   const [note, setNote] = useState('');
+   const [saving, setSaving] = useState(false);
+ 
++  const [editOpen, setEditOpen] = useState(false);
++  const [editName, setEditName] = useState('');
++  const [editPhone, setEditPhone] = useState('');
++  const [editThreshold, setEditThreshold] = useState('');
++  const [editSaving, setEditSaving] = useState(false);
++
++  const [deleteOpen, setDeleteOpen] = useState(false);
++  const [deleting, setDeleting] = useState(false);
++
++  const archived = !!customer?.archived_at;
++  const hasHistory = ledger.length > 0;
++
+   // ── Fetch data ───────────────────────────────────────────
+-  async function fetchData() {
++  const fetchData = useCallback(async () => {
+     if (!id) return;
+     const supabase = createClient();
+-
+-    const { data: cust } = await supabase
+-      .from('customers')
+-      .select('*')
+-      .eq('id', id)
+-      .single();
++    const [{ data: cust }, { data: entries }, { data: setting }] = await Promise.all([
++      supabase.from('customers').select('*').eq('id', id).maybeSingle(),
++      supabase.from('ledger').select('*').eq('customer_id', id).order('created_at', { ascending: false }),
++      supabase.from('app_settings').select('value').eq('key', 'store_name').maybeSingle(),
++    ]);
++    if (!cust) {
++      setNotFound(true);
++      return;
++    }
+     setCustomer(cust);
++    setLedger(entries ?? []);
++    if (typeof setting?.value === 'string' && setting.value.trim()) setStoreName(setting.value);
++  }, [id]);
+ 
+-    const { data: entries } = await supabase
+-      .from('ledger')
+-      .select('*')
+-      .eq('customer_id', id)
+-      .order('created_at', { ascending: false });
+-    if (entries) setLedger(entries);
+-  }
+-
+-  // ── Trigger fetch when id changes ───────────────────────
+   useEffect(() => {
+     async function load() {
+-      if (!id) return;
+-      const supabase = createClient();
+-
+-      const { data: cust } = await supabase
+-        .from('customers')
+-        .select('*')
+-        .eq('id', id)
+-        .single();
+-      setCustomer(cust);
+-
+-      const { data: entries } = await supabase
+-        .from('ledger')
+-        .select('*')
+-        .eq('customer_id', id)
+-        .order('created_at', { ascending: false });
+-      if (entries) setLedger(entries);
++      await fetchData();
+     }
+     load();
+-  }, [id]);
++  }, [fetchData]);
+ 
+   // ── Handle payment / add-balance ────────────────────────
+-  // Routed through the record_credit_change RPC via a server action, same as
+-  // every other credit mutation in the app — this used to insert into
+-  // `ledger` directly with a client-computed running_balance, which never
+-  // actually updated customers.credit_balance, so "Outstanding credit" went
+-  // stale after every "payment". The RPC updates both atomically.
++  // Routed through the record_credit_change RPC via a server action, so the
++  // balance and the ledger always update together.
+   const handleSubmit = async () => {
+     const value = parseFloat(amount);
+     if (!value || value <= 0) {
+@@ -107,28 +99,155 @@ export default function CustomerCreditPage() {
+       toast.success(mode === 'payment_made' ? 'Payment recorded' : 'Balance added');
+       setAmount('');
+       setNote('');
+-      fetchData(); // refresh the list
++      fetchData();
+     }
+     setSaving(false);
+   };
+ 
++  // ── Edit details ─────────────────────────────────────────
++  function openEdit() {
++    if (!customer) return;
++    setEditName(customer.name);
++    setEditPhone(customer.phone ?? '');
++    setEditThreshold(customer.credit_warning_threshold?.toString() ?? '');
++    setEditOpen(true);
++  }
++
++  async function handleEditSave() {
++    if (!customer) return;
++    const threshold = editThreshold.trim() === '' ? null : parseFloat(editThreshold);
++    if (threshold !== null && (isNaN(threshold) || threshold < 0)) {
++      toast.error('Credit limit must be a positive number, or leave it blank');
++      return;
++    }
++    setEditSaving(true);
++    const { error } = await updateCustomer(customer.id, {
++      name: editName,
++      phone: editPhone,
++      credit_warning_threshold: threshold,
++    });
++    setEditSaving(false);
++    if (error) {
++      toast.error(error);
++      return;
++    }
++    toast.success('Customer updated');
++    setEditOpen(false);
++    fetchData();
++  }
++
++  // ── Delete / archive / restore ───────────────────────────
++  async function handleDelete() {
++    if (!customer) return;
++    setDeleting(true);
++    const { result, error } = await deleteCustomer(customer.id);
++    setDeleting(false);
++    if (error) {
++      toast.error(error);
++      return;
++    }
++    setDeleteOpen(false);
++    if (result === 'deleted') {
++      toast.success(`${customer.name} deleted`);
++      router.push('/customers');
++    } else {
++      toast.success(`${customer.name} archived — their history is kept`);
++      fetchData();
++    }
++  }
++
++  async function handleRestore() {
++    if (!customer) return;
++    const { error } = await restoreCustomer(customer.id);
++    if (error) {
++      toast.error(error);
++      return;
++    }
++    toast.success(`${customer.name} restored`);
++    fetchData();
++  }
++
++  // ── Statement (copy for the customer) ────────────────────
++  function handlePrint() {
++    if (!customer) return;
++    if (!printStatement(customer, ledger, storeName)) {
++      toast.error('Your browser blocked the pop-up. Allow pop-ups for this site and try again.');
++    }
++  }
++
++  async function handleDownload() {
++    if (!customer) return;
++    try {
++      await downloadStatementXlsx(customer, ledger, storeName);
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : 'Could not create the file');
++    }
++  }
++
++  if (notFound) {
++    return (
++      <div className="p-8 text-sm text-ink-faint">
++        This customer no longer exists. <Link href="/customers" className="text-primary hover:underline">Back to customers</Link>
++      </div>
++    );
++  }
++
+   if (!customer) {
+     return <div className="p-8 text-sm text-ink-faint">Loading…</div>;
+   }
+ 
+   return (
+     <div className="p-6 max-w-4xl mx-auto">
+-      <h1 className="text-2xl font-bold text-ink">{customer.name}</h1>
+-      <p className="text-sm text-ink-faint mt-1">
+-        Phone: {customer.phone || 'N/A'}
+-      </p>
+-      <p className="text-xl font-bold text-gold mt-2 tabular">
+-        Outstanding credit: {formatPeso(customer.credit_balance)}
+-      </p>
++      <Link href="/customers" className="inline-flex items-center gap-1.5 text-sm text-ink-faint hover:text-ink mb-4 transition-colors">
++        <ArrowLeft size={14} />
++        Back to customers
++      </Link>
++
++      {archived && (
++        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface-sunken px-4 py-3 mb-4 text-sm text-ink-soft">
++          <Archive size={16} className="text-ink-faint shrink-0" />
++          <span className="flex-1">
++            Archived on {formatDate(customer.archived_at!)}. Hidden from the customer list and the POS; history is kept.
++          </span>
++          <Button size="sm" variant="secondary" onClick={handleRestore}>
++            <RotateCcw size={13} /> Restore
++          </Button>
++        </div>
++      )}
++
++      <div className="flex items-start justify-between gap-4 flex-wrap">
++        <div>
++          <h1 className="text-2xl font-bold text-ink">{customer.name}</h1>
++          <p className="text-sm text-ink-faint mt-1">
++            Phone: {customer.phone || 'N/A'}
++            {customer.credit_warning_threshold != null && (
++              <> · Credit limit warning at {formatPeso(customer.credit_warning_threshold)}</>
++            )}
++          </p>
++          <p className="text-xl font-bold text-gold mt-2 tabular">
++            Outstanding credit: {formatPeso(customer.credit_balance)}
++          </p>
++        </div>
++        <div className="flex items-center gap-2 flex-wrap">
++          <Button size="sm" variant="secondary" onClick={handlePrint}>
++            <Printer size={13} /> Print statement
++          </Button>
++          <Button size="sm" variant="secondary" onClick={handleDownload}>
++            <FileDown size={13} /> Excel
++          </Button>
++          <Button size="sm" variant="secondary" onClick={openEdit}>
++            <Pencil size={13} /> Edit
++          </Button>
++          {!archived && (
++            <Button size="sm" variant="ghost" onClick={() => setDeleteOpen(true)} className="text-danger hover:text-danger">
++              <Trash2 size={13} /> {hasHistory ? 'Archive' : 'Delete'}
++            </Button>
++          )}
++        </div>
++      </div>
+ 
+       {/* Payment / Add balance form */}
+       <div className="bg-gold-soft border border-gold/20 p-4 rounded-2xl my-6">
+-        {/* Mode toggle */}
+         <div className="flex gap-1.5 mb-3">
+           <button
+             onClick={() => setMode('payment_made')}
+@@ -142,7 +261,9 @@ export default function CustomerCreditPage() {
+           </button>
+           <button
+             onClick={() => setMode('credit_given')}
+-            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
++            disabled={archived}
++            title={archived ? 'Restore this customer before adding credit' : undefined}
++            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+               mode === 'credit_given'
+                 ? 'bg-gold text-white border-gold'
+                 : 'bg-surface text-ink-soft border-border hover:border-gold'
+@@ -218,6 +339,76 @@ export default function CustomerCreditPage() {
+           </tbody>
+         </table>
+       </div>
++
++      {/* Edit modal */}
++      <Modal open={editOpen} onClose={() => !editSaving && setEditOpen(false)} title="Edit customer">
++        <div className="p-5 flex flex-col gap-3">
++          <label className="flex flex-col gap-1 text-xs font-semibold text-ink-soft">
++            Name
++            <Input value={editName} onChange={(e) => setEditName(e.target.value)} autoFocus />
++          </label>
++          <label className="flex flex-col gap-1 text-xs font-semibold text-ink-soft">
++            Phone
++            <Input value={editPhone} onChange={(e) => setEditPhone(e.target.value)} placeholder="Optional" />
++          </label>
++          <label className="flex flex-col gap-1 text-xs font-semibold text-ink-soft">
++            Credit limit warning
++            <Input
++              type="number"
++              prefix="₱"
++              value={editThreshold}
++              onChange={(e) => setEditThreshold(e.target.value)}
++              placeholder="Blank = use the default"
++              className="tabular"
++            />
++          </label>
++          <div className="flex gap-2 mt-1">
++            <Button variant="secondary" className="flex-1" onClick={() => setEditOpen(false)} disabled={editSaving}>
++              Cancel
++            </Button>
++            <Button className="flex-1" onClick={handleEditSave} disabled={editSaving}>
++              {editSaving ? 'Saving…' : 'Save'}
++            </Button>
++          </div>
++        </div>
++      </Modal>
++
++      {/* Delete / archive confirm */}
++      <Modal
++        open={deleteOpen}
++        onClose={() => !deleting && setDeleteOpen(false)}
++        title={hasHistory ? `Archive ${customer.name}?` : `Delete ${customer.name}?`}
++      >
++        <div className="p-5 flex flex-col gap-4">
++          {customer.credit_balance !== 0 ? (
++            <p className="text-sm text-ink-soft">
++              {customer.name} still owes <span className="font-bold text-gold">{formatPeso(customer.credit_balance)}</span>.
++              Record their payment first — a customer can&apos;t be removed while they have a balance.
++            </p>
++          ) : hasHistory ? (
++            <p className="text-sm text-ink-soft">
++              They have credit history, so they&apos;ll be <span className="font-semibold text-ink">archived</span> instead of
++              deleted: hidden from the customer list and the POS, with their history kept. You can restore them any time
++              from the Archived filter.
++            </p>
++          ) : (
++            <p className="text-sm text-ink-soft">They have no history, so they&apos;ll be removed permanently.</p>
++          )}
++          <div className="flex gap-2">
++            <Button variant="secondary" className="flex-1" onClick={() => setDeleteOpen(false)} disabled={deleting}>
++              Cancel
++            </Button>
++            <Button
++              variant="danger"
++              className="flex-1"
++              onClick={handleDelete}
++              disabled={deleting || customer.credit_balance !== 0}
++            >
++              {deleting ? 'Working…' : hasHistory ? 'Archive' : 'Delete'}
++            </Button>
++          </div>
++        </div>
++      </Modal>
+     </div>
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/src/app/(app)/customers/action.ts b/src/app/(app)/customers/action.ts
+index 6a836f5..84d213b 100644
+--- a/src/app/(app)/customers/action.ts
++++ b/src/app/(app)/customers/action.ts
+@@ -33,4 +33,52 @@ export async function recordCreditChange(
+   revalidatePath(`/customers/${customerId}/credit`)
+   revalidatePath('/customers')
+   return { balance: data as number, error: null }
+-}
+\ No newline at end of file
++}
++export interface CustomerDetails {
++  name: string
++  phone: string | null
++  credit_warning_threshold: number | null
++}
++
++export async function updateCustomer(
++  customerId: string,
++  details: CustomerDetails
++): Promise<{ error: string | null }> {
++  const name = details.name.trim()
++  if (!name) return { error: 'Name is required' }
++  const supabase = await createClient()
++  const { error } = await supabase
++    .from('customers')
++    .update({
++      name,
++      phone: details.phone?.trim() || null,
++      credit_warning_threshold: details.credit_warning_threshold,
++    })
++    .eq('id', customerId)
++  if (error) return { error: error.message }
++  revalidatePath(`/customers/${customerId}/credit`)
++  revalidatePath('/customers')
++  return { error: null }
++}
++
++// delete_customer() deletes a customer with no history, archives one that
++// has credit/sales history (so the record of who owed what survives), and
++// refuses while they still owe anything.
++export async function deleteCustomer(
++  customerId: string
++): Promise<{ result: 'deleted' | 'archived' | null; error: string | null }> {
++  const supabase = await createClient()
++  const { data, error } = await supabase.rpc('delete_customer', { p_customer_id: customerId })
++  if (error) return { result: null, error: error.message }
++  revalidatePath('/customers')
++  return { result: data as 'deleted' | 'archived', error: null }
++}
++
++export async function restoreCustomer(customerId: string): Promise<{ error: string | null }> {
++  const supabase = await createClient()
++  const { error } = await supabase.from('customers').update({ archived_at: null }).eq('id', customerId)
++  if (error) return { error: error.message }
++  revalidatePath(`/customers/${customerId}/credit`)
++  revalidatePath('/customers')
++  return { error: null }
++}
+diff --git a/src/app/(app)/customers/page.tsx b/src/app/(app)/customers/page.tsx
+index 7f8d998..454627d 100644
+--- a/src/app/(app)/customers/page.tsx
++++ b/src/app/(app)/customers/page.tsx
+@@ -1,50 +1,45 @@
+ 'use client'
+ 
+-import { useEffect, useRef, useState } from 'react'
++import { useEffect, useState } from 'react'
+ import Link from 'next/link'
+ import { createClient } from '@/lib/supabase/client'
+ import { formatPeso } from '@/lib/utils/currency'
+ import type { Customer } from '@/types/database'
+-import { UserPlus, Search } from 'lucide-react'
++import { UserPlus, Search, Archive } from 'lucide-react'
+ 
+ export default function CustomersPage() {
+   const [customers, setCustomers] = useState<Customer[]>([])
+-  const [search, setSearch]       = useState('')
+-  const [loading, setLoading]     = useState(true)
+-  const supabaseRef = useRef<any>(null);
+-
+-  useEffect(() => {
+-    supabaseRef.current = createClient();
+-  }, []);
+-
+-  // useEffect(() => {
+-  //   setLoading(true)
+-  //   const client = supabaseRef.current || createClient()
+-  //   let query = client.from('customers').select('*').order('name')
+-  //   if (search.trim()) query = query.ilike('name', `%${search}%`)
+-  //   query.then(({ data }) => { setCustomers(data ?? []); setLoading(false) })
+-  // }, [])
++  const [search, setSearch] = useState('')
++  const [showArchived, setShowArchived] = useState(false)
++  const [loading, setLoading] = useState(true)
+ 
+   useEffect(() => {
++    let cancelled = false
+     async function fetchCustomers() {
+-      if (!supabaseRef.current) return;
+-
+-      const [{ data: customersData }, { data: filteredCustomersData }] = await Promise.all([
+-        supabaseRef.current.from('customers').select('*').order('name'),
+-        supabaseRef.current.from('customers').select('*').ilike('name', `%${search}%`).order('name')
+-      ]);
+-      setCustomers(filteredCustomersData ?? customersData ?? []);
+-      setLoading(false);
++      const supabase = createClient()
++      let query = supabase.from('customers').select('*').order('name')
++      // Archived customers (removed, but kept for their credit history) are
++      // hidden unless asked for.
++      query = showArchived ? query.not('archived_at', 'is', null) : query.is('archived_at', null)
++      if (search.trim()) query = query.ilike('name', `%${search.trim()}%`)
++      const { data } = await query
++      if (!cancelled) {
++        setCustomers(data ?? [])
++        setLoading(false)
++      }
+     }
+-    fetchCustomers();
+-  }, [search]);
++    const t = setTimeout(fetchCustomers, search ? 250 : 0)
++    return () => { cancelled = true; clearTimeout(t) }
++  }, [search, showArchived])
+ 
+   return (
+     <div className="p-6 max-w-5xl mx-auto">
+       <div className="flex items-center justify-between mb-6">
+         <div>
+           <h1 className="text-xl font-bold text-ink">Customers</h1>
+-          <p className="text-xs text-ink-faint mt-0.5">{customers.length} registered</p>
++          <p className="text-xs text-ink-faint mt-0.5">
++            {customers.length} {showArchived ? 'archived' : 'registered'}
++          </p>
+         </div>
+         <Link
+           href="/customers/new"
+@@ -56,16 +51,29 @@ export default function CustomersPage() {
+         </Link>
+       </div>
+ 
+-      <div className="relative mb-4">
+-        <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint" />
+-        <input
+-          type="text"
+-          placeholder="Search by name…"
+-          value={search}
+-          onChange={e => setSearch(e.target.value)}
+-          className="w-full pl-10 pr-4 py-2.5 bg-surface border border-border rounded-xl text-sm
+-            focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+-        />
++      <div className="flex items-center gap-2 mb-4">
++        <div className="relative flex-1">
++          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint" />
++          <input
++            type="text"
++            placeholder="Search by name…"
++            value={search}
++            onChange={e => setSearch(e.target.value)}
++            className="w-full pl-10 pr-4 py-2.5 bg-surface border border-border rounded-xl text-sm
++              focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
++          />
++        </div>
++        <button
++          onClick={() => { setLoading(true); setShowArchived(v => !v) }}
++          className={`shrink-0 flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-semibold transition-colors ${
++            showArchived
++              ? 'bg-primary text-white border-primary'
++              : 'bg-surface text-ink-faint border-border hover:border-primary hover:text-primary'
++          }`}
++        >
++          <Archive size={14} />
++          Archived
++        </button>
+       </div>
+ 
+       <div className="bg-surface rounded-2xl border border-border overflow-hidden">
+@@ -73,7 +81,7 @@ export default function CustomersPage() {
+           <div className="py-10 text-center text-sm text-ink-faint">Loading…</div>
+         ) : customers.length === 0 ? (
+           <div className="py-10 text-center text-sm text-ink-faint">
+-            {search ? 'No customers match your search' : 'No customers yet'}
++            {search ? 'No customers match your search' : showArchived ? 'No archived customers' : 'No customers yet'}
+           </div>
+         ) : (
+           <table className="w-full text-left">
+@@ -102,7 +110,7 @@ export default function CustomersPage() {
+                       href={`/customers/${c.id}/credit`}
+                       className="text-xs font-semibold text-primary hover:underline"
+                     >
+-                      View credit
++                      {showArchived ? 'View' : 'View / edit'}
+                     </Link>
+                   </td>
+                 </tr>
+@@ -113,4 +121,4 @@ export default function CustomersPage() {
+       </div>
+     </div>
+   )
+-}
+\ No newline at end of file
++}
+diff --git a/src/app/(app)/products/action.ts b/src/app/(app)/products/action.ts
+index 5dda7b0..61d953d 100644
+--- a/src/app/(app)/products/action.ts
++++ b/src/app/(app)/products/action.ts
+@@ -70,6 +70,31 @@ export async function updateProduct(id: string, payload: ProductPayload) {
+   return data
+ }
+ 
++// ------------------- DELETE -------------------
++// Hard delete. Past sales keep their own snapshot of the product name and
++// price (sales.product_id is ON DELETE SET NULL), so receipts and reports are
++// unaffected. Errors are returned, not thrown — see the NOTE in pos/action.ts.
++export async function deleteProducts(ids: string[]): Promise<{ deleted: number; error: string | null }> {
++  if (ids.length === 0) return { deleted: 0, error: null }
++  const supabase = await createClient()
++  let deleted = 0
++  // Chunked so a large selection doesn't build an over-long request URL.
++  for (let i = 0; i < ids.length; i += 200) {
++    const { data, error } = await supabase
++      .from('products')
++      .delete()
++      .in('id', ids.slice(i, i + 200))
++      .select('id')
++    if (error) {
++      revalidatePath('/products')
++      return { deleted, error: error.message }
++    }
++    deleted += data?.length ?? 0
++  }
++  revalidatePath('/products')
++  return { deleted, error: null }
++}
++
+ // ------------------- BULK EDIT -------------------
+ 
+ export interface RowEdit {
+diff --git a/src/app/globals.css b/src/app/globals.css
+index db98d1c..f7b6c76 100644
+--- a/src/app/globals.css
++++ b/src/app/globals.css
+@@ -102,27 +102,28 @@ body {
+ }
+ 
+ /*
+-  Add these rules to your globals.css (or import this file there).
+-  Handles 80mm thermal printer receipt layout.
++  Receipt printing (80mm thermal printer).
+ 
+-  In your layout.tsx, add this to <head>:
+-    <link rel="stylesheet" href="/print.css" media="print" />
+-
+-  Or just paste into globals.css — the @media print block isolates it.
++  Only [data-print-receipt] is printed. Everything else is made INVISIBLE
++  rather than display:none — the receipt lives deep inside the page, and
++  hiding its ancestors with display:none (the old `body > *` rule) hid the
++  receipt along with them, so prints came out blank.
+ */
+-
+ @media print {
+-  /* Hide the entire page UI */
+-  body > * {
+-    display: none !important;
++  body * {
++    visibility: hidden !important;
+   }
+ 
+-  /* Hide the modal overlay inside the receipt component */
++  /* The on-screen receipt modal/overlay shouldn't take up space either */
+   [data-print-hide] {
+     display: none !important;
+   }
+ 
+-  /* Show only the receipt content */
++  [data-print-receipt],
++  [data-print-receipt] * {
++    visibility: visible !important;
++  }
++
+   [data-print-receipt] {
+     display: block !important;
+     position: fixed;
+@@ -134,6 +135,20 @@ body {
+     color: #000 !important;
+   }
+ 
++  /* Collapse the (invisible) page so it can't spill onto extra blank
++     pages. The receipt is position:fixed, so it isn't clipped by this. */
++  html,
++  body {
++    height: auto !important;
++    min-height: 0 !important;
++  }
++  body > * {
++    height: 0 !important;
++    min-height: 0 !important;
++    max-height: 0 !important;
++    overflow: hidden !important;
++  }
++
+   @page {
+     size: 80mm auto;
+     margin: 0;
+diff --git a/src/components/pos/customer-picker.tsx b/src/components/pos/customer-picker.tsx
+index a6bd78f..16104e8 100644
+--- a/src/components/pos/customer-picker.tsx
++++ b/src/components/pos/customer-picker.tsx
+@@ -27,8 +27,8 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
+     const timeout = setTimeout(async () => {
+       setLoading(true)
+       const req = query.trim()
+-        ? supabase.from('customers').select('*').ilike('name', `%${query.trim()}%`).order('name').limit(20)
+-        : supabase.from('customers').select('*').order('name').limit(20)
++        ? supabase.from('customers').select('*').is('archived_at', null).ilike('name', `%${query.trim()}%`).order('name').limit(20)
++        : supabase.from('customers').select('*').is('archived_at', null).order('name').limit(20)
+ 
+       const { data } = await req
+       if (!cancelled) {
+diff --git a/src/components/products/product-preview-pane.tsx b/src/components/products/product-preview-pane.tsx
+index 08302dc..c8ae930 100644
+--- a/src/components/products/product-preview-pane.tsx
++++ b/src/components/products/product-preview-pane.tsx
+@@ -2,8 +2,8 @@
+ 
+ import { useState } from 'react'
+ import { toast } from 'sonner'
+-import { Check, Circle, CircleCheck } from 'lucide-react'
+-import { createProduct, updateProduct, type ProductPayload } from '@/src/app/(app)/products/action'
++import { Check, Circle, CircleCheck, Trash2 } from 'lucide-react'
++import { createProduct, updateProduct, deleteProducts, type ProductPayload } from '@/src/app/(app)/products/action'
+ import type { Product, ProductCategory } from '@/types/database'
+ 
+ interface Props {
+@@ -12,6 +12,7 @@ interface Props {
+   categories: ProductCategory[]
+   prefillBarcode?: string
+   onSaved: (product: Product) => void
++  onDeleted: (id: string) => void
+ }
+ 
+ const emptyForm = (barcode?: string): ProductPayload => ({
+@@ -19,7 +20,7 @@ const emptyForm = (barcode?: string): ProductPayload => ({
+   price: 0, cost: 0, stocks: 0, low_stock_threshold: 5, is_active: true,
+ })
+ 
+-export default function ProductPreviewPane({ mode, product, categories, prefillBarcode, onSaved }: Props) {
++export default function ProductPreviewPane({ mode, product, categories, prefillBarcode, onSaved, onDeleted }: Props) {
+   const [form, setForm] = useState<ProductPayload>(() =>
+     product
+       ? {
+@@ -30,6 +31,22 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
+       : emptyForm(prefillBarcode)
+   )
+   const [saving, setSaving] = useState(false)
++  // Two-step delete: first click arms it, second click deletes.
++  const [confirmDelete, setConfirmDelete] = useState(false)
++  const [deleting, setDeleting] = useState(false)
++
++  async function handleDelete() {
++    if (!product) return
++    setDeleting(true)
++    const { error } = await deleteProducts([product.id])
++    setDeleting(false)
++    if (error) {
++      toast.error(error)
++      return
++    }
++    toast.success(`Deleted ${product.name}`)
++    onDeleted(product.id)
++  }
+ 
+   function set<K extends keyof ProductPayload>(key: K, value: ProductPayload[K]) {
+     setForm(f => ({ ...f, [key]: value }))
+@@ -125,6 +142,32 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
+         <Check size={16} />
+         {saving ? 'Saving…' : mode === 'create' ? 'Create product' : 'Save changes'}
+       </button>
++
++      {mode === 'edit' && product && (
++        confirmDelete ? (
++          <div className="rounded-xl border border-danger/30 bg-danger-soft p-3 flex flex-col gap-2">
++            <p className="text-xs text-ink-soft">
++              Delete <span className="font-bold text-ink">{product.name}</span>? Past sales and receipts keep
++              their record of it. To just hide it from the POS, mark it Inactive instead.
++            </p>
++            <div className="flex gap-2">
++              <button onClick={() => setConfirmDelete(false)} disabled={deleting} className="flex-1 rounded-lg border border-border bg-surface py-2 text-xs font-semibold text-ink-soft">
++                Cancel
++              </button>
++              <button onClick={handleDelete} disabled={deleting} className="flex-1 rounded-lg bg-danger py-2 text-xs font-bold text-white disabled:opacity-60">
++                {deleting ? 'Deleting…' : 'Delete'}
++              </button>
++            </div>
++          </div>
++        ) : (
++          <button
++            onClick={() => setConfirmDelete(true)}
++            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-ink-faint hover:text-danger py-1 transition-colors"
++          >
++            <Trash2 size={13} /> Delete product
++          </button>
++        )
++      )}
+     </div>
+   )
+ }
+diff --git a/src/components/products/products-client.tsx b/src/components/products/products-client.tsx
+index 4f12c95..be32acf 100644
+--- a/src/components/products/products-client.tsx
++++ b/src/components/products/products-client.tsx
+@@ -3,11 +3,12 @@
+ import { useEffect, useState, useCallback } from 'react'
+ import Link from 'next/link'
+ import { toast } from 'sonner'
+-import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package } from 'lucide-react'
++import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package, Trash2 } from 'lucide-react'
+ import { createClient } from '@/lib/supabase/client'
+ import { useBarcodeScanner } from '@/hooks/use-barcode-scanner'
+ import { formatPeso } from '@/lib/utils/currency'
+-import { exportProducts } from '@/src/app/(app)/products/action'
++import { exportProducts, deleteProducts } from '@/src/app/(app)/products/action'
++import Modal from '@/src/components/ui/modal'
+ import ProductPreviewPane from './product-preview-pane'
+ import BulkEditModal from './bulk-edit-modal'
+ import type { Product, ProductCategory } from '@/types/database'
+@@ -28,6 +29,8 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+   const [prefillBarcode, setPrefillBarcode] = useState<string | undefined>()
+   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+   const [showBulkEdit, setShowBulkEdit] = useState(false)
++  const [showBulkDelete, setShowBulkDelete] = useState(false)
++  const [bulkDeleting, setBulkDeleting] = useState(false)
+ 
+   const refresh = useCallback(async () => {
+     setLoading(true)
+@@ -92,6 +95,33 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+     refresh()
+   }
+ 
++  function handleDeleted(id: string) {
++    setSelectedProduct(null)
++    setPreviewMode(null)
++    setSelectedIds(prev => {
++      const next = new Set(prev)
++      next.delete(id)
++      return next
++    })
++    refresh()
++  }
++
++  async function handleBulkDelete() {
++    const ids = [...selectedIds]
++    setBulkDeleting(true)
++    const { deleted, error } = await deleteProducts(ids)
++    setBulkDeleting(false)
++    if (error) toast.error(`Deleted ${deleted} of ${ids.length}: ${error}`)
++    else toast.success(`Deleted ${deleted} product${deleted === 1 ? '' : 's'}`)
++    setShowBulkDelete(false)
++    setSelectedIds(new Set())
++    if (selectedProduct && ids.includes(selectedProduct.id)) {
++      setSelectedProduct(null)
++      setPreviewMode(null)
++    }
++    refresh()
++  }
++
+   async function handleExport() {
+     try {
+       const csv = await exportProducts()
+@@ -121,6 +151,14 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+           >
+             <Layers size={13} /> Bulk edit{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+           </button>
++          {selectedIds.size > 0 && (
++            <button
++              onClick={() => setShowBulkDelete(true)}
++              className="flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3.5 py-2 text-xs font-bold text-danger hover:border-danger transition-colors"
++            >
++              <Trash2 size={13} /> Delete ({selectedIds.size})
++            </button>
++          )}
+           <button onClick={handleExport} className="flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3.5 py-2 text-xs font-bold text-ink-soft hover:border-primary transition-colors">
+             <FileDown size={13} /> Export
+           </button>
+@@ -211,10 +249,28 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+             categories={categories}
+             prefillBarcode={prefillBarcode}
+             onSaved={handleSaved}
++            onDeleted={handleDeleted}
+           />
+         )}
+       </div>
+ 
++      <Modal open={showBulkDelete} onClose={() => !bulkDeleting && setShowBulkDelete(false)} title={`Delete ${selectedIds.size} product${selectedIds.size === 1 ? '' : 's'}?`}>
++        <div className="p-5 flex flex-col gap-4">
++          <p className="text-sm text-ink-soft">
++            This can&apos;t be undone. Past sales and receipts keep their record of these products. To just hide
++            them from the POS, use Bulk edit to mark them Inactive instead.
++          </p>
++          <div className="flex gap-2">
++            <button onClick={() => setShowBulkDelete(false)} disabled={bulkDeleting} className="flex-1 rounded-xl border border-border py-2.5 text-sm font-semibold text-ink-soft">
++              Cancel
++            </button>
++            <button onClick={handleBulkDelete} disabled={bulkDeleting} className="flex-1 rounded-xl bg-danger py-2.5 text-sm font-bold text-white disabled:opacity-60">
++              {bulkDeleting ? 'Deleting…' : `Delete ${selectedIds.size}`}
++            </button>
++          </div>
++        </div>
++      </Modal>
++
+       {showBulkEdit && (
+         <BulkEditModal
+           products={products.filter(p => selectedIds.has(p.id))}
+diff --git a/supabase/migrations/0002_customer_archive.sql b/supabase/migrations/0002_customer_archive.sql
+new file mode 100644
+index 0000000..bfdfe10
+--- /dev/null
++++ b/supabase/migrations/0002_customer_archive.sql
+@@ -0,0 +1,100 @@
++-- ============================================================================
++-- Customer delete / archive
++--
++-- A customer with credit or sales history can't be hard-deleted: their ledger
++-- entries and invoices point at them, and that history is the record of who
++-- owed what. delete_customer() therefore:
++--   * refuses while they still owe something (balance must be settled first),
++--   * deletes them outright if they have no history at all,
++--   * otherwise ARCHIVES them (archived_at set): hidden from lists and the
++--     POS picker, history intact, restorable.
++-- Archived customers can't be given new credit until they are restored.
++-- ============================================================================
++
++alter table public.customers add column archived_at timestamptz;
++
++create function public.delete_customer(p_customer_id uuid)
++returns text            -- 'deleted' | 'archived'
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_customer public.customers%rowtype;
++begin
++  if auth.uid() is null then
++    raise exception 'Not authenticated';
++  end if;
++
++  select * into v_customer from public.customers where id = p_customer_id for update;
++  if not found then
++    raise exception 'Customer not found';
++  end if;
++
++  if v_customer.credit_balance <> 0 then
++    raise exception '% still has a balance of %. Settle it before removing them', v_customer.name, v_customer.credit_balance;
++  end if;
++
++  if exists (select 1 from public.ledger where customer_id = p_customer_id)
++     or exists (select 1 from public.sale_invoice where customer_id = p_customer_id) then
++    update public.customers set archived_at = now() where id = p_customer_id;
++    return 'archived';
++  end if;
++
++  delete from public.customers where id = p_customer_id;
++  return 'deleted';
++end;
++$$;
++
++revoke execute on function public.delete_customer(uuid) from public, anon;
++grant execute on function public.delete_customer(uuid) to authenticated, service_role;
++
++-- Block new credit for an archived customer (they'd vanish from the lists
++-- while owing money). Same function as the baseline plus that one check.
++create or replace function public.record_credit_change(
++  p_customer_id uuid,
++  p_invoice_id uuid,
++  p_entry_type ledger_entry_type,
++  p_amount numeric,
++  p_description text default null,
++  p_created_at timestamptz default null
++)
++returns numeric
++language plpgsql security definer set search_path = public
++as $$
++declare
++  v_new_balance numeric;
++  v_delta numeric;
++begin
++  if auth.uid() is null then
++    raise exception 'Not authenticated';
++  end if;
++  if p_amount is null or p_amount <= 0 then
++    raise exception 'Amount must be greater than zero';
++  end if;
++
++  if p_entry_type in ('credit_given','opening_balance')
++     and exists (select 1 from public.customers where id = p_customer_id and archived_at is not null) then
++    raise exception 'This customer is archived. Restore them before adding credit';
++  end if;
++
++  v_delta := case when p_entry_type in ('credit_given','opening_balance') then p_amount else -p_amount end;
++
++  update public.customers
++  set credit_balance = credit_balance + v_delta
++  where id = p_customer_id
++  returning credit_balance into v_new_balance;
++
++  if not found then
++    raise exception 'Customer % not found', p_customer_id;
++  end if;
++
++  if p_entry_type = 'payment_made' and v_new_balance < 0 then
++    raise exception 'Payment of % exceeds current balance', p_amount;
++  end if;
++
++  insert into public.ledger (customer_id, invoice_id, entry_type, amount, running_balance, description, created_at)
++  values (p_customer_id, p_invoice_id, p_entry_type, p_amount, v_new_balance, p_description,
++          least(coalesce(p_created_at, now()), now()));
++
++  return v_new_balance;
++end;
++$$;
+diff --git a/types/database.ts b/types/database.ts
+index 4449a64..7740f57 100644
+--- a/types/database.ts
++++ b/types/database.ts
+@@ -41,6 +41,7 @@ export interface Customer {
+   credit_balance: number
+   credit_warning_threshold: number | null
+   created_at: string
++  archived_at: string | null // set = hidden from lists; see delete_customer()
+ }
+ 
+ export interface LedgerEntry {
+-- 
+2.43.0
+

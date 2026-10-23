@@ -1,0 +1,267 @@
+From cf2f006bdb065abd979c8a7fd80836bd7fd665bd Mon Sep 17 00:00:00 2001
+From: yxin-d <yxin2502@gmail.com>
+Date: Thu, 22 Oct 2026 13:00:16 +0800
+Subject: [PATCH] Price changes: mark flagged rows as reviewed; healthy-margin
+ filter
+
+- "Mark as reviewed" on a flagged row (raise price? / selling at a loss)
+  clears the warning and files it under a new "Reviewed" filter, with Undo.
+  A new cost/price change to the same product clears the review again.
+- Migration 0006 (already applied live): reviewed_at column; staff may set
+  only that column, the history values stay read-only
+- Products list status filter: "Healthy margin (10% or more)"
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QPERamDaxbxzn2kMqyuA1B
+---
+ src/app/(app)/reports/price-changes/page.tsx  | 71 ++++++++++++++++---
+ src/components/products/products-client.tsx   | 13 ++--
+ .../migrations/0006_price_change_review.sql   | 51 +++++++++++++
+ 3 files changed, 120 insertions(+), 15 deletions(-)
+ create mode 100644 supabase/migrations/0006_price_change_review.sql
+
+diff --git a/src/app/(app)/reports/price-changes/page.tsx b/src/app/(app)/reports/price-changes/page.tsx
+index a52c60f..f3f54a4 100644
+--- a/src/app/(app)/reports/price-changes/page.tsx
++++ b/src/app/(app)/reports/price-changes/page.tsx
+@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
+ import { createClient } from '@/lib/supabase/client'
+ import { formatPeso, formatDate } from '@/lib/utils/currency'
+ import { manilaDate } from '@/lib/utils/date'
+-import { Search, TrendingUp, TrendingDown, AlertTriangle, ArrowRight } from 'lucide-react'
++import { toast } from 'sonner'
++import { Search, TrendingUp, TrendingDown, AlertTriangle, ArrowRight, Check, Undo2 } from 'lucide-react'
+ 
+ interface ChangeRow {
+   id: string
+@@ -16,11 +17,15 @@ interface ChangeRow {
+   old_price: number
+   new_price: number
+   changed_at: string
++  reviewed_at: string | null
++  // the database rows this displayed row stands for (several when older
++  // same-day rows are merged); reviewing marks all of them
++  ids?: string[]
+   products: { price: number; cost: number; name: string } | null
+   product_categories: { name: string } | null
+ }
+ 
+-type Filter = 'all' | 'review' | 'cost_up' | 'cost_down'
++type Filter = 'all' | 'review' | 'reviewed' | 'cost_up' | 'cost_down'
+ 
+ function daysAgo(n: number): string {
+   return manilaDate(new Date(Date.now() - n * 86_400_000))
+@@ -41,9 +46,12 @@ function analyse(r: ChangeRow) {
+   const marginPctNow = now && now.price > 0 ? ((now.price - now.cost) / now.price) * 100 : null
+   // Cost went up, the price didn't move with it, and it still hasn't been
+   // raised since. Deleted products can't be reviewed, so they're excluded.
+-  const needsReview = costDelta > 0 && priceDelta <= 0 && !!now && now.price <= r.new_price
++  const flagged = costDelta > 0 && priceDelta <= 0 && !!now && now.price <= r.new_price
+   const atLoss = !!now && now.price > 0 && now.price <= now.cost
+-  return { costDelta, priceDelta, costPct, marginNow, marginPctNow, needsReview, atLoss }
++  // Someone checked it and decided the price is fine: no more warning.
++  const reviewed = !!r.reviewed_at && (flagged || atLoss)
++  const needsReview = flagged && !reviewed
++  return { costDelta, priceDelta, costPct, marginNow, marginPctNow, needsReview, atLoss, reviewed }
+ }
+ 
+ export default function PriceChangesPage() {
+@@ -90,8 +98,15 @@ export default function PriceChangesPage() {
+       const key = `${r.product_id ?? r.product_name}|${manilaDate(new Date(r.changed_at))}`
+       const prev = byKey.get(key)
+       byKey.set(key, prev
+-        ? { ...r, old_cost: prev.old_cost, old_price: prev.old_price }
+-        : r)
++        ? {
++            ...r,
++            old_cost: prev.old_cost,
++            old_price: prev.old_price,
++            ids: [...(prev.ids ?? [prev.id]), r.id],
++            // reviewed only if every underlying row was
++            reviewed_at: prev.reviewed_at && r.reviewed_at ? r.reviewed_at : null,
++          }
++        : { ...r, ids: [r.id] })
+     }
+     return [...byKey.values()]
+       .filter(r => r.old_cost !== r.new_cost || r.old_price !== r.new_price)
+@@ -103,6 +118,7 @@ export default function PriceChangesPage() {
+   const counts = useMemo(() => ({
+     all: analysed.length,
+     review: analysed.filter(x => x.a.needsReview).length,
++    reviewed: analysed.filter(x => x.a.reviewed).length,
+     cost_up: analysed.filter(x => x.a.costDelta > 0).length,
+     cost_down: analysed.filter(x => x.a.costDelta < 0).length,
+   }), [analysed])
+@@ -112,12 +128,30 @@ export default function PriceChangesPage() {
+     return analysed.filter(({ r, a }) => {
+       if (q && !r.product_name.toLowerCase().includes(q)) return false
+       if (filter === 'review') return a.needsReview
++      if (filter === 'reviewed') return a.reviewed
+       if (filter === 'cost_up') return a.costDelta > 0
+       if (filter === 'cost_down') return a.costDelta < 0
+       return true
+     })
+   }, [analysed, search, filter])
+ 
++  // Mark (or un-mark) a flagged change as checked. Updated on screen right
++  // away; put back if the save fails.
++  async function setReviewed(row: ChangeRow, reviewed: boolean) {
++    const ids = row.ids ?? [row.id]
++    const stamp = reviewed ? new Date().toISOString() : null
++    const before = rows
++    setRows(rs => rs.map(r => (ids.includes(r.id) ? { ...r, reviewed_at: stamp } : r)))
++    const supabase = createClient()
++    const { error } = await supabase.from('product_price_changes').update({ reviewed_at: stamp }).in('id', ids)
++    if (error) {
++      setRows(before)
++      toast.error(`Couldn't save: ${error.message}`)
++    } else {
++      toast.success(reviewed ? `${row.product_name} marked as reviewed` : 'Review undone')
++    }
++  }
++
+   return (
+     <div className="p-6 max-w-6xl mx-auto">
+       <div className="mb-5">
+@@ -131,6 +165,7 @@ export default function PriceChangesPage() {
+       <div className="flex flex-wrap gap-2 mb-3">
+         <Chip active={filter === 'all'} onClick={() => setFilter('all')} label="All changes" count={counts.all} />
+         <Chip active={filter === 'review'} onClick={() => setFilter('review')} label="Needs a price review" count={counts.review} tone="warning" />
++        <Chip active={filter === 'reviewed'} onClick={() => setFilter('reviewed')} label="Reviewed" count={counts.reviewed} />
+         <Chip active={filter === 'cost_up'} onClick={() => setFilter('cost_up')} label="Cost went up" count={counts.cost_up} />
+         <Chip active={filter === 'cost_down'} onClick={() => setFilter('cost_down')} label="Cost went down" count={counts.cost_down} />
+       </div>
+@@ -209,16 +244,30 @@ export default function PriceChangesPage() {
+                       ) : '—'}
+                     </td>
+                     <td className="px-4 py-3 text-right">
+-                      {a.atLoss ? (
+-                        <Badge tone="danger">Selling at a loss</Badge>
+-                      ) : a.needsReview ? (
++                      {a.reviewed ? (
+                         <div className="flex flex-col items-end gap-0.5">
+-                          <Badge tone="warning">Raise price?</Badge>
+-                          {suggestion !== null && suggestion > (r.products?.price ?? 0) && (
++                          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-primary-soft text-primary-dark whitespace-nowrap">
++                            <Check size={11} /> Reviewed
++                          </span>
++                          <button onClick={() => setReviewed(r, false)} className="inline-flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink">
++                            <Undo2 size={11} /> Undo
++                          </button>
++                        </div>
++                      ) : a.atLoss || a.needsReview ? (
++                        <div className="flex flex-col items-end gap-1">
++                          {a.atLoss ? <Badge tone="danger">Selling at a loss</Badge> : <Badge tone="warning">Raise price?</Badge>}
++                          {!a.atLoss && suggestion !== null && suggestion > (r.products?.price ?? 0) && (
+                             <span className="text-[11px] text-ink-faint whitespace-nowrap">
+                               same margin ≈ {formatPeso(suggestion)}
+                             </span>
+                           )}
++                          <button
++                            onClick={() => setReviewed(r, true)}
++                            title="I've checked this — the price is fine as it is"
++                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline whitespace-nowrap"
++                          >
++                            <Check size={11} /> Mark as reviewed
++                          </button>
+                         </div>
+                       ) : null}
+                     </td>
+diff --git a/src/components/products/products-client.tsx b/src/components/products/products-client.tsx
+index c5b817d..8ffcdb9 100644
+--- a/src/components/products/products-client.tsx
++++ b/src/components/products/products-client.tsx
+@@ -13,7 +13,7 @@ import ProductPreviewPane from './product-preview-pane'
+ import BulkEditModal from './bulk-edit-modal'
+ import type { Product, ProductCategory } from '@/types/database'
+ 
+-type StatusFilter = '' | 'active' | 'inactive' | 'low_margin'
++type StatusFilter = '' | 'active' | 'inactive' | 'low_margin' | 'healthy_margin'
+ 
+ // Margin = selling price − cost, and as a % of the selling price.
+ // "low" = under 10%, which is where a small cost increase starts to hurt.
+@@ -56,9 +56,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+     if (error) toast.error('Failed to load products: ' + error.message)
+     // Margin is calculated, not a column, so this filter runs here.
+     const rows = (data ?? []) as Product[]
+-    setProducts(statusFilter === 'low_margin'
+-      ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
+-      : rows)
++    setProducts(
++      statusFilter === 'low_margin'
++        ? rows.filter(p => { const m = marginOf(p).kind; return m === 'low' || m === 'loss' })
++        : statusFilter === 'healthy_margin'
++          ? rows.filter(p => marginOf(p).kind === 'ok')
++          : rows
++    )
+     setLoading(false)
+   }, [search, categoryFilter, statusFilter])
+ 
+@@ -202,6 +206,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
+           <option value="active">Active only</option>
+           <option value="inactive">Inactive only</option>
+           <option value="low_margin">Low margin or loss (under {LOW_MARGIN_PCT}%)</option>
++          <option value="healthy_margin">Healthy margin ({LOW_MARGIN_PCT}% or more)</option>
+         </select>
+         <div className="flex items-center gap-2 bg-primary-soft border border-dashed border-primary rounded-xl px-3 py-2 text-xs font-bold text-primary-dark">
+           <Scan size={14} /> Scan to find
+diff --git a/supabase/migrations/0006_price_change_review.sql b/supabase/migrations/0006_price_change_review.sql
+new file mode 100644
+index 0000000..a40694f
+--- /dev/null
++++ b/supabase/migrations/0006_price_change_review.sql
+@@ -0,0 +1,51 @@
++-- ============================================================================
++-- "Mark as reviewed" for price changes.
++--
++-- reviewed_at is set when someone has checked a flagged change and decided
++-- the price is fine. Staff may set or clear ONLY that column — the history
++-- values themselves stay read-only. If the same product changes again on the
++-- same day (the row gets merged), the review is cleared, because that's a new
++-- change nobody has checked yet.
++-- ============================================================================
++
++alter table public.product_price_changes add column reviewed_at timestamptz;
++
++create policy "product_price_changes review" on public.product_price_changes
++  for update to authenticated using (true) with check (true);
++grant update (reviewed_at) on public.product_price_changes to authenticated;
++
++create or replace function public.log_product_price_change()
++returns trigger language plpgsql security definer set search_path = public as $$
++declare
++  v_today_id uuid;
++begin
++  select id into v_today_id
++  from public.product_price_changes
++  where product_id = new.id
++    -- start of today in Manila, as a timestamptz
++    and changed_at >= (public.business_date()::timestamp at time zone 'Asia/Manila')
++  order by changed_at desc
++  limit 1
++  for update;
++
++  if v_today_id is not null then
++    update public.product_price_changes
++    set new_cost = new.cost,
++        new_price = new.price,
++        product_name = new.name,
++        volume = new.volume,
++        category_id = new.category_id,
++        changed_at = now(),
++        reviewed_at = null
++    where id = v_today_id;
++  else
++    insert into public.product_price_changes
++      (product_id, product_name, volume, category_id, old_cost, new_cost, old_price, new_price)
++    values
++      (new.id, new.name, new.volume, new.category_id, old.cost, new.cost, old.price, new.price);
++  end if;
++  return new;
++end;
++$$;
++
++revoke execute on function public.log_product_price_change() from public, anon, authenticated;
+-- 
+2.43.0
+
