@@ -3,10 +3,11 @@
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
-import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package, Trash2 } from 'lucide-react'
+import { Search, Plus, FileDown, FileUp, Tag, Layers, Scan, Package, Trash2, X } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useBarcodeScanner } from '@/hooks/use-barcode-scanner'
 import { formatPeso } from '@/lib/utils/currency'
+import { wordsFilter } from '@/lib/utils/search'
 import { exportProducts, deleteProducts } from '@/src/app/(app)/products/action'
 import Modal from '@/src/components/ui/modal'
 import ProductPreviewPane from './product-preview-pane'
@@ -51,7 +52,9 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
     let query = supabase.from('products').select('*, product_categories(name)').order('name')
     if (categoryFilter) query = query.eq('category_id', categoryFilter)
     if (statusFilter === 'active' || statusFilter === 'inactive') query = query.eq('is_active', statusFilter === 'active')
-    if (search.trim()) query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%,sku.ilike.%${search}%`)
+    // Every typed word must match the name, size, barcode or SKU, in any order.
+    const filter = wordsFilter(search, ['name', 'volume', 'barcode', 'sku'])
+    if (filter) query = query.or(filter)
     const { data, error } = await query
     if (error) toast.error('Failed to load products: ' + error.message)
     // Margin is calculated, not a column, so this filter runs here.
@@ -195,7 +198,18 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center gap-2 bg-surface border border-border rounded-xl px-3 py-2 flex-1 min-w-[200px]">
           <Search size={15} className="text-ink-faint" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, barcode, SKU…" className="flex-1 text-sm bg-transparent outline-none" />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Escape') setSearch('') }}
+            placeholder="Search by name, barcode, SKU…"
+            className="flex-1 min-w-0 text-sm bg-transparent outline-none"
+          />
+          {search && (
+            <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="-my-1 -mr-1.5 p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-surface-sunken">
+              <X size={16} />
+            </button>
+          )}
         </div>
         <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)} className="bg-surface border border-border rounded-xl px-3 py-2 text-sm text-ink-soft">
           <option value="">All categories</option>

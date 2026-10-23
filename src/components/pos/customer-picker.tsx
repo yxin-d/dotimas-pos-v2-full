@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso } from '@/lib/utils/currency'
+import { wordsFilter } from '@/lib/utils/search'
 import type { Customer } from '@/types/database'
 import { Search, X, UserPlus } from 'lucide-react'
 
@@ -26,9 +27,10 @@ export default function CustomerPicker({ onSelect, onClose }: Props) {
 
     const timeout = setTimeout(async () => {
       setLoading(true)
-      const req = query.trim()
-        ? supabase.from('customers').select('*').is('archived_at', null).ilike('name', `%${query.trim()}%`).order('name').limit(20)
-        : supabase.from('customers').select('*').is('archived_at', null).order('name').limit(20)
+      const filter = wordsFilter(query, ['name', 'phone'])
+      let req = supabase.from('customers').select('*').is('archived_at', null)
+      if (filter) req = req.or(filter)
+      req = req.order('name').limit(20)
 
       const { data } = await req
       if (!cancelled) {

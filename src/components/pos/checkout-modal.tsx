@@ -8,6 +8,7 @@ import { formatPeso } from '@/lib/utils/currency'
 import { completeSale } from '@/src/app/(app)/pos/action'
 import type { Customer, PaymentMethod } from '@/types/database'
 import CustomerPicker from './customer-picker'
+import { DecimalInput } from '@/src/components/ui/number-input'
 
 type SimpleMethod = Exclude<PaymentMethod, 'mixed' | 'credit'>
 type TenderMode = SimpleMethod | 'mixed' | 'credit'
@@ -26,12 +27,27 @@ const METHOD_LABEL: Record<TenderMode, string> = {
   cash: 'Cash', gcash: 'GCash', maya: 'Maya', mixed: 'Mixed', credit: 'Credit',
 }
 
+// The bills a customer is likely to hand over for this total: the next
+// round amount at each common note (₱20, ₱50, ₱100, ₱500, ₱1000).
+// e.g. ₱115 -> 120, 150, 200, 500.
+function quickCashAmounts(total: number): number[] {
+  if (total <= 0) return []
+  const picks = new Set<number>()
+  for (const note of [20, 50, 100, 500, 1000]) {
+    const amount = Math.ceil(total / note) * note
+    if (amount > total) picks.add(amount)
+  }
+  return [...picks].sort((a, b) => a - b).slice(0, 4)
+}
+
 export default function CheckoutModal({ onClose, onComplete }: Props) {
   const { items, total, customer, setCustomer, clearCart } = useCart()
   const cartTotal = total()
 
   const [mode, setMode] = useState<TenderMode>('cash')
-  const [singleAmount, setSingleAmount] = useState(cartTotal.toFixed(2))
+  // Empty = paid the exact amount. The total is only shown as a placeholder,
+  // so typing "150" gives 150 — not "115150" like when it was pre-filled.
+  const [singleAmount, setSingleAmount] = useState('')
   const [rows, setRows] = useState<Row[]>([{ method: 'cash', amount: '' }, { method: 'gcash', amount: '' }])
   const [showPicker, setShowPicker] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -44,7 +60,7 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
   const isMixed = mode === 'mixed'
 
   const mixedPaid = rows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0)
-  const singleReceived = parseFloat(singleAmount) || 0
+  const singleReceived = singleAmount === '' ? cartTotal : (parseFloat(singleAmount) || 0)
   const change = mode === 'cash' ? Math.max(singleReceived - cartTotal, 0) : 0
 
   const overThreshold = isCredit && customer?.credit_warning_threshold != null
@@ -119,7 +135,7 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
             {(['cash', 'gcash', 'maya', 'mixed', 'credit'] as TenderMode[]).map(m => (
               <button
                 key={m}
-                onClick={() => { setMode(m); if (m !== 'cash') setSingleAmount(cartTotal.toFixed(2)) }}
+                onClick={() => { setMode(m); setSingleAmount('') }}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
                   mode === m ? 'bg-primary text-white border-primary' : 'bg-surface text-ink-soft border-border hover:border-primary'
                 }`}
@@ -169,12 +185,10 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
                     <option value="gcash">GCash</option>
                     <option value="maya">Maya</option>
                   </select>
-                  <input
-                    type="number"
-                    inputMode="decimal"
+                  <DecimalInput
                     value={row.amount}
-                    onChange={e => setRows(rs => rs.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
-                    placeholder="0.00"
+                    onChange={v => setRows(rs => rs.map((r, i) => i === idx ? { ...r, amount: v } : r))}
+                    placeholder={mixedPaid < cartTotal ? `${(cartTotal - mixedPaid).toFixed(2)} left` : '0.00'}
                     className="tabular flex-1 rounded-lg border border-border bg-canvas px-3 py-2 text-sm font-bold text-ink outline-none focus-visible:border-primary"
                   />
                   {rows.length > 1 && (
@@ -202,16 +216,32 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
               <label className="text-xs font-semibold text-ink-soft">
                 {mode === 'cash' ? 'Amount received' : `Amount sent via ${METHOD_LABEL[mode]}`}
               </label>
-              <input
-                type="number"
-                inputMode="decimal"
+              <DecimalInput
                 autoFocus
                 value={singleAmount}
-                onChange={e => setSingleAmount(e.target.value)}
-                className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-xl font-bold text-ink outline-none focus-visible:border-primary"
+                onChange={setSingleAmount}
+                onKeyDown={e => { if (e.key === 'Enter') handleSubmit() }}
+                placeholder={`${cartTotal.toFixed(2)} (exact)`}
+                className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-xl font-bold text-ink outline-none focus-visible:border-primary placeholder:text-ink-faint/60 placeholder:font-semibold"
               />
+              {mode === 'cash' && (
+                <div className="flex flex-wrap gap-1.5">
+                  <QuickButton active={singleAmount === ''} onClick={() => setSingleAmount('')}>Exact</QuickButton>
+                  {quickCashAmounts(cartTotal).map(a => (
+                    <QuickButton key={a} active={parseFloat(singleAmount) === a} onClick={() => setSingleAmount(String(a))}>
+                      {formatPeso(a).replace('.00', '')}
+                    </QuickButton>
+                  ))}
+                </div>
+              )}
+              {mode === 'cash' && singleAmount !== '' && singleReceived < cartTotal && (
+                <p className="text-sm text-danger">Short by <span className="tabular font-bold">{formatPeso(cartTotal - singleReceived)}</span></p>
+              )}
               {mode === 'cash' && change > 0 && (
-                <p className="text-sm text-ink-soft">Change: <span className="tabular font-bold text-gold">{formatPeso(change)}</span></p>
+                <div className="flex items-center justify-between rounded-xl bg-gold-soft px-4 py-3">
+                  <span className="text-sm font-semibold text-ink-soft">Change</span>
+                  <span className="tabular text-2xl font-extrabold text-gold">{formatPeso(change)}</span>
+                </div>
               )}
             </div>
           )}
@@ -235,5 +265,19 @@ export default function CheckoutModal({ onClose, onComplete }: Props) {
         />
       )}
     </div>
+  )
+}
+
+function QuickButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-w-[64px] px-3.5 py-2.5 rounded-xl border text-sm font-bold tabular transition-colors active:scale-95 ${
+        active ? 'bg-primary text-white border-primary' : 'bg-surface text-ink-soft border-border hover:border-primary'
+      }`}
+    >
+      {children}
+    </button>
   )
 }

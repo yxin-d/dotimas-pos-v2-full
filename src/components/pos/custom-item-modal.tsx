@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
 import { X, Zap } from 'lucide-react'
 import { useCart } from '@/hooks/use-cart'
+import { DecimalInput } from '@/src/components/ui/number-input'
 
 interface Props {
   onClose: () => void
@@ -50,11 +51,9 @@ export default function CustomItemModal({ onClose }: Props) {
           placeholder="Item name"
           className="rounded-xl border border-border bg-canvas px-3.5 py-2.5 text-sm text-ink outline-none focus-visible:border-primary"
         />
-        <input
-          type="number"
-          inputMode="decimal"
+        <DecimalInput
           value={price}
-          onChange={e => setPrice(e.target.value)}
+          onChange={setPrice}
           placeholder="Price"
           className="tabular rounded-xl border border-border bg-canvas px-3.5 py-2.5 text-sm font-bold text-ink outline-none focus-visible:border-primary"
         />

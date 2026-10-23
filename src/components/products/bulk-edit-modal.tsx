@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { X, Layers, Check } from 'lucide-react'
 import { batchEditProducts, type RowEdit } from '@/src/app/(app)/products/action'
 import type { Product, ProductCategory } from '@/types/database'
+import { NumberInput } from '@/src/components/ui/number-input'
 
 interface Props {
   products: Product[]        // the full records for whatever's currently selected
@@ -79,14 +80,14 @@ export default function BulkEditModal({ products, categories, onClose, onDone }:
                   <p className="text-sm font-semibold text-ink truncate">{product.name}</p>
                   <p className="text-[11px] text-ink-faint">{product.volume ?? '\u00A0'}</p>
                 </div>
-                <input
-                  type="number" inputMode="decimal" value={row.price}
-                  onChange={e => updateRow(product.id, 'price', parseFloat(e.target.value) || 0)}
+                <NumberInput
+                  value={row.price}
+                  onValueChange={v => updateRow(product.id, 'price', v)}
                   className="tabular rounded-lg border border-border bg-canvas px-2 py-1.5 text-sm font-bold text-ink w-full outline-none focus-visible:border-primary"
                 />
-                <input
-                  type="number" inputMode="decimal" value={row.cost}
-                  onChange={e => updateRow(product.id, 'cost', parseFloat(e.target.value) || 0)}
+                <NumberInput
+                  value={row.cost}
+                  onValueChange={v => updateRow(product.id, 'cost', v)}
                   className="tabular rounded-lg border border-border bg-canvas px-2 py-1.5 text-sm text-ink w-full outline-none focus-visible:border-primary"
                 />
                 <input

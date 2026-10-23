@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { Wallet } from 'lucide-react'
 import { openDay } from '@/src/app/(app)/day-actions'
+import { DecimalInput } from '@/src/components/ui/number-input'
 
 interface OpenDayModalProps {
   onDone: () => void
@@ -48,12 +49,10 @@ export default function OpenDayModal({ onDone, onDismiss }: OpenDayModalProps) {
 
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-semibold text-ink-soft">Starting cash in the drawer</label>
-          <input
-            type="number"
-            inputMode="decimal"
+          <DecimalInput
             autoFocus
             value={cash}
-            onChange={(e) => setCash(e.target.value)}
+            onChange={setCash}
             onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit() }}
             placeholder="0.00"
             className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-lg font-bold text-ink outline-none focus-visible:border-primary"

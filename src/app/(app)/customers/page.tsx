@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { formatPeso } from '@/lib/utils/currency'
+import { wordsFilter } from '@/lib/utils/search'
 import type { Customer } from '@/types/database'
 import { UserPlus, Search, Archive } from 'lucide-react'
 
@@ -21,7 +22,8 @@ export default function CustomersPage() {
       // Archived customers (removed, but kept for their credit history) are
       // hidden unless asked for.
       query = showArchived ? query.not('archived_at', 'is', null) : query.is('archived_at', null)
-      if (search.trim()) query = query.ilike('name', `%${search.trim()}%`)
+      const filter = wordsFilter(search, ['name', 'phone'])
+      if (filter) query = query.or(filter)
       const { data } = await query
       if (!cancelled) {
         setCustomers(data ?? [])

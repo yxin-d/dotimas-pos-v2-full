@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { Check, Circle, CircleCheck, Trash2 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProducts, type ProductPayload } from '@/src/app/(app)/products/action'
 import type { Product, ProductCategory } from '@/types/database'
+import { NumberInput } from '@/src/components/ui/number-input'
 
 interface Props {
   mode: 'edit' | 'create'
@@ -109,19 +110,19 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
 
       <div className="flex gap-3">
         <Field label="Price">
-          <input type="number" inputMode="decimal" value={form.price} onChange={e => set('price', parseFloat(e.target.value) || 0)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.price} onValueChange={v => set('price', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
         <Field label="Cost">
-          <input type="number" inputMode="decimal" value={form.cost} onChange={e => set('cost', parseFloat(e.target.value) || 0)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.cost} onValueChange={v => set('cost', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
       </div>
 
       <div className="flex gap-3">
         <Field label="Stocks">
-          <input type="number" inputMode="numeric" value={form.stocks} onChange={e => set('stocks', parseFloat(e.target.value) || 0)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.stocks} onValueChange={v => set('stocks', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
         <Field label="Low stock at">
-          <input type="number" inputMode="numeric" value={form.low_stock_threshold} onChange={e => set('low_stock_threshold', parseFloat(e.target.value) || 0)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.low_stock_threshold} onValueChange={v => set('low_stock_threshold', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
       </div>
 

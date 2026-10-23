@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate, manilaMonthStart } from '@/lib/utils/date'
 import { expenseCategoryLabels, type ExpenseCategory } from '@/lib/expense-categories'
+import { DecimalInput } from '@/src/components/ui/number-input'
 import { toast } from 'sonner'
 import {
   Plus,
@@ -403,14 +404,11 @@ export default function ExpensesPage() {
                 <label className="block text-sm font-medium text-ink-soft mb-1">
                   Amount (₱) *
                 </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
+                <DecimalInput
                   required
                   value={formData.amount}
-                  onChange={(e) =>
-                    setFormData((f) => ({ ...f, amount: e.target.value }))
+                  onChange={(v) =>
+                    setFormData((f) => ({ ...f, amount: v }))
                   }
                   className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
                   placeholder="0.00"

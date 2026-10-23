@@ -6,6 +6,7 @@ import { Wallet } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { formatDate } from '@/lib/utils/currency'
 import { expenseCategoryLabels, type ExpenseCategory } from '@/lib/expense-categories'
+import { DecimalInput } from '@/src/components/ui/number-input'
 
 interface Props {
   // The business day the expense belongs to. When a day is open this is that
@@ -77,11 +78,9 @@ export default function ExpenseModal({ expenseDate, onClose }: Props) {
         <div className="flex gap-3">
           <div className="flex-1 flex flex-col gap-1.5">
             <label className="text-xs font-semibold text-ink-soft">Amount</label>
-            <input
-              type="number"
-              inputMode="decimal"
+            <DecimalInput
               value={amount}
-              onChange={e => setAmount(e.target.value)}
+              onChange={setAmount}
               onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
               placeholder="0.00"
               className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-2.5 text-lg font-bold text-ink outline-none focus-visible:border-primary"

@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { PowerOff } from 'lucide-react'
 import { closeDay } from '@/src/app/(app)/day-actions'
 import { formatPeso } from '@/lib/utils/currency'
+import { DecimalInput } from '@/src/components/ui/number-input'
 
 interface CloseDayModalProps {
   onClose: () => void
@@ -69,12 +70,10 @@ export default function CloseDayModal({ onClose, onDone }: CloseDayModalProps) {
           <>
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold text-ink-soft">Actual cash counted</label>
-              <input
-                type="number"
-                inputMode="decimal"
+              <DecimalInput
                 autoFocus
                 value={cash}
-                onChange={(e) => setCash(e.target.value)}
+                onChange={setCash}
                 placeholder="0.00"
                 className="tabular w-full rounded-xl border border-border bg-canvas px-4 py-3 text-lg font-bold text-ink outline-none focus-visible:border-primary"
               />

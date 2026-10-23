@@ -281,11 +281,14 @@ export default function CustomerCreditPage() {
         <div className="flex flex-wrap gap-3 items-start">
           <div className="w-40">
             <Input
-              type="number"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
               placeholder={mode === 'payment_made' ? 'Amount paid' : 'Amount to add'}
               prefix="₱"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))}
+              onFocus={(e) => e.currentTarget.select()}
               className="tabular"
             />
           </div>
@@ -354,10 +357,13 @@ export default function CustomerCreditPage() {
           <label className="flex flex-col gap-1 text-xs font-semibold text-ink-soft">
             Credit limit warning
             <Input
-              type="number"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
               prefix="₱"
               value={editThreshold}
-              onChange={(e) => setEditThreshold(e.target.value)}
+              onChange={(e) => setEditThreshold(e.target.value.replace(/[^0-9.]/g, ''))}
+              onFocus={(e) => e.currentTarget.select()}
               placeholder="Blank = use the default"
               className="tabular"
             />

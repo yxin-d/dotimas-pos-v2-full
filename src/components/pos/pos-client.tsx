@@ -17,8 +17,9 @@ import ExpenseModal from './expense-modal'
 import Receipt from './receipt'
 import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate } from '@/lib/utils/date'
+import { wordsFilter } from '@/lib/utils/search'
 import CategoryGrid, { ALL_PRODUCTS, UNCATEGORIZED } from './category-grid'
-import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, Receipt as ReceiptIcon } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, X, Receipt as ReceiptIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, PosSession } from '@/types/database'
@@ -43,6 +44,12 @@ export default function PosClient({ session, categories }: Props) {
   const [totalCount, setTotalCount] = useState(0)
   const [search, setSearch] = useState('')
   const searching = search.trim().length > 0
+  const searchRef = useRef<HTMLInputElement>(null)
+  // One tap clears the box and keeps the cursor there for the next search.
+  function clearSearch() {
+    setSearch('')
+    searchRef.current?.focus()
+  }
   const [showInactive, setShowInactive] = useState(false)
   const [loading, setLoading] = useState(true)
   const [activeModal, setActiveModal] = useState<ActiveModal>(null)
@@ -123,7 +130,9 @@ export default function PosClient({ session, categories }: Props) {
       if (!showInactive) query = query.eq('is_active', true)
       if (searching) {
         // Searching always spans every category, whatever screen you're on.
-        query = query.or(`name.ilike.%${search}%,barcode.ilike.%${search}%`)
+        // Every typed word must match the name, size or barcode, in any order.
+        const filter = wordsFilter(search, ['name', 'volume', 'barcode'])
+        if (filter) query = query.or(filter)
       } else if (activeCategory === UNCATEGORIZED) {
         query = query.is('category_id', null)
       } else if (activeCategory !== ALL_PRODUCTS) {
@@ -283,11 +292,23 @@ export default function PosClient({ session, categories }: Props) {
             <div className="flex-1 flex items-center gap-2 bg-canvas border border-border rounded-xl px-3 py-2">
               <Search size={15} className="text-ink-faint" />
               <input
+                ref={searchRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Escape') clearSearch() }}
                 placeholder="Search or scan barcode…"
-                className="flex-1 text-sm bg-transparent outline-none"
+                className="flex-1 min-w-0 text-sm bg-transparent outline-none"
               />
+              {search && (
+                <button
+                  type="button"
+                  onClick={clearSearch}
+                  aria-label="Clear search"
+                  className="-my-1 -mr-1.5 p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-surface-sunken"
+                >
+                  <X size={16} />
+                </button>
+              )}
             </div>
             <button
               onClick={() => setShowInactive(v => !v)}
