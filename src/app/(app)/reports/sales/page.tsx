@@ -173,11 +173,11 @@ export default function SalesPage() {
                         #{inv.id.slice(0, 8).toUpperCase()}
                       </span>
                       {inv.is_credit && (
-                        <span className="text-[10px] font-bold bg-gold-soft text-gold px-1.5 py-0.5 rounded-full">
+                        <span className="text-[0.625rem] font-bold bg-gold-soft text-gold px-1.5 py-0.5 rounded-full">
                           UTANG
                         </span>
                       )}
-                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full uppercase
+                      <span className={`text-[0.625rem] font-semibold px-1.5 py-0.5 rounded-full uppercase
                         ${inv.payment_method === 'cash' ? 'bg-surface-sunken text-ink-soft' :
                           inv.payment_method === 'gcash' ? 'bg-primary-soft text-primary' :
                           'bg-surface-sunken text-ink-soft'}`}

@@ -63,7 +63,7 @@ export default function BulkEditModal({ products, categories, onClose, onDone }:
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          <div className="grid grid-cols-[1.6fr_0.9fr_0.9fr_1fr_1.1fr_0.6fr] gap-2 px-5 py-2 text-[10px] font-bold text-ink-faint uppercase tracking-wide sticky top-0 bg-surface border-b border-border">
+          <div className="grid grid-cols-[1.6fr_0.9fr_0.9fr_1fr_1.1fr_0.6fr] gap-2 px-5 py-2 text-[0.625rem] font-bold text-ink-faint uppercase tracking-wide sticky top-0 bg-surface border-b border-border">
             <span>Product</span>
             <span>Price</span>
             <span>Cost</span>
@@ -78,7 +78,7 @@ export default function BulkEditModal({ products, categories, onClose, onDone }:
               <div key={product.id} className="grid grid-cols-[1.6fr_0.9fr_0.9fr_1fr_1.1fr_0.6fr] gap-2 px-5 py-2.5 items-center border-b border-border last:border-0">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-ink truncate">{product.name}</p>
-                  <p className="text-[11px] text-ink-faint">{product.volume ?? '\u00A0'}</p>
+                  <p className="text-[0.6875rem] text-ink-faint">{product.volume ?? '\u00A0'}</p>
                 </div>
                 <NumberInput
                   value={row.price}

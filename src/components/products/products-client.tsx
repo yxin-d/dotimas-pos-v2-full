@@ -41,6 +41,10 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [previewMode, setPreviewMode] = useState<'edit' | 'create' | null>(null)
   const [prefillBarcode, setPrefillBarcode] = useState<string | undefined>()
+  // Identity of the open form. A new value = a fresh form. It's changed when a
+  // form is opened (button, list click, scan) — NOT when a new product is
+  // saved, so the form stays put and can show "Saved".
+  const [paneKey, setPaneKey] = useState(0)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkEdit, setShowBulkEdit] = useState(false)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -79,11 +83,14 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   const handleScan = useCallback(async (barcode: string) => {
     const supabase = createClient()
     const { data } = await supabase.from('products').select('*, product_categories(name)').eq('barcode', barcode).maybeSingle()
+    setPaneKey(k => k + 1)
     if (data) {
       setSelectedProduct(data)
       setPreviewMode('edit')
       toast.success(`Found: ${data.name}`)
     } else {
+      // Every scan of an unknown barcode opens a fresh "new product" form
+      // with that barcode filled in.
       setSelectedProduct(null)
       setPreviewMode('create')
       setPrefillBarcode(barcode)
@@ -102,12 +109,14 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   }
 
   function openCreate() {
+    setPaneKey(k => k + 1)
     setSelectedProduct(null)
     setPrefillBarcode(undefined)
     setPreviewMode('create')
   }
 
   function openEdit(p: Product) {
+    if (p.id !== selectedProduct?.id) setPaneKey(k => k + 1)
     setSelectedProduct(p)
     setPrefillBarcode(undefined)
     setPreviewMode('edit')
@@ -252,8 +261,8 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                   Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
                 </span>
                 <span className="shrink-0 w-16 text-right">Stock</span>
-                <span className="shrink-0 w-20 text-right hidden sm:block">Cost</span>
-                <span className="shrink-0 w-20 text-right">Price</span>
+                <span className="shrink-0 w-24 text-right hidden sm:block">Cost</span>
+                <span className="shrink-0 w-24 text-right">Price</span>
                 <span className="shrink-0 w-24 text-right">Margin</span>
               </div>
               {products.map(p => (
@@ -272,13 +281,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                     className="accent-primary shrink-0"
                   />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-ink truncate">{p.name}</p>
-                    <p className="text-xs text-ink-faint">{p.product_categories?.name ?? 'Uncategorized'}{p.volume ? ` · ${p.volume}` : ''}</p>
+                    <p className="text-base font-bold text-ink truncate">{p.name}</p>
+                    <p className="text-sm text-ink-soft">{p.product_categories?.name ?? 'Uncategorized'}{p.volume ? ` · ${p.volume}` : ''}</p>
                   </div>
-                  {!p.is_active && <span className="text-[10px] font-bold text-ink-faint bg-surface-sunken px-2 py-0.5 rounded-full shrink-0">Inactive</span>}
-                  <span className="text-xs text-ink-faint tabular shrink-0 w-16 text-right">{p.stocks} left</span>
-                  <span className="text-xs text-ink-soft tabular shrink-0 w-20 text-right hidden sm:block">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
-                  <span className="text-sm font-bold text-gold tabular shrink-0 w-20 text-right">{formatPeso(p.price)}</span>
+                  {!p.is_active && <span className="text-[0.625rem] font-bold text-ink-faint bg-surface-sunken px-2 py-0.5 rounded-full shrink-0">Inactive</span>}
+                  <span className="text-sm text-ink-soft tabular shrink-0 w-16 text-right">{p.stocks} left</span>
+                  <span className="text-sm text-ink-soft tabular shrink-0 w-24 text-right hidden sm:block">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
+                  <span className="text-base font-bold text-gold tabular shrink-0 w-24 text-right">{formatPeso(p.price)}</span>
                   <MarginCell product={p} />
                 </button>
               ))}
@@ -288,7 +297,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
 
         {previewMode && (
           <ProductPreviewPane
-            key={selectedProduct?.id ?? `create-${prefillBarcode ?? ''}`}
+            key={paneKey}
             mode={previewMode}
             product={selectedProduct}
             categories={categories}
@@ -330,13 +339,13 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
 
 function MarginCell({ product }: { product: Product }) {
   const m = marginOf(product)
-  if (m.kind === 'unpriced') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No price</span>
-  if (m.kind === 'no_cost') return <span className="shrink-0 w-24 text-right text-[11px] text-ink-faint">No cost set</span>
+  if (m.kind === 'unpriced') return <span className="shrink-0 w-24 text-right text-[0.6875rem] text-ink-faint">No price</span>
+  if (m.kind === 'no_cost') return <span className="shrink-0 w-24 text-right text-[0.6875rem] text-ink-faint">No cost set</span>
   const color = m.kind === 'loss' ? 'text-danger' : m.kind === 'low' ? 'text-warning' : 'text-primary'
   return (
     <span className={`shrink-0 w-24 text-right tabular leading-tight ${color}`}>
-      <span className="block text-sm font-semibold">{formatPeso(m.amount)}</span>
-      <span className="block text-[11px]">{m.kind === 'loss' ? 'loss' : `${m.pct.toFixed(0)}%`}</span>
+      <span className="block text-base font-semibold">{formatPeso(m.amount)}</span>
+      <span className="block text-xs">{m.kind === 'loss' ? 'loss' : `${m.pct.toFixed(0)}%`}</span>
     </span>
   )
 }

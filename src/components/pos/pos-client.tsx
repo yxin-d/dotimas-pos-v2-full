@@ -155,6 +155,13 @@ export default function PosClient({ session, categories }: Props) {
   // category screen doesn't keep a product list loaded, so a scan that isn't
   // in the visible list is looked up directly instead of failing.
   const handleScan = useCallback(async (barcode: string) => {
+    // A window is open (checkout, void, expense…). Don't change the cart
+    // behind it — the scan has already been kept out of whatever field the
+    // cursor was in.
+    if (activeModal) {
+      toast.message('Close this window first, then scan the item.')
+      return
+    }
     let match: Product | null | undefined = products.find(p => p.barcode === barcode)
     if (!match && supabaseRef.current) {
       let query = supabaseRef.current.from('products').select('*').eq('barcode', barcode)
@@ -169,7 +176,7 @@ export default function PosClient({ session, categories }: Props) {
     } else {
       toast.error(`No product with barcode ${barcode}`)
     }
-  }, [products, addItem, showInactive])
+  }, [products, addItem, showInactive, activeModal])
   useBarcodeScanner(handleScan)
 
   // F2 shortcut for the custom-item quick-add

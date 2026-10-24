@@ -246,10 +246,10 @@ export default function PriceChangesPage() {
                     <td className="px-4 py-3 text-right">
                       {a.reviewed ? (
                         <div className="flex flex-col items-end gap-0.5">
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-primary-soft text-primary-dark whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1 text-[0.6875rem] font-bold px-2 py-0.5 rounded-full bg-primary-soft text-primary-dark whitespace-nowrap">
                             <Check size={11} /> Reviewed
                           </span>
-                          <button onClick={() => setReviewed(r, false)} className="inline-flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink">
+                          <button onClick={() => setReviewed(r, false)} className="inline-flex items-center gap-1 text-[0.6875rem] text-ink-faint hover:text-ink">
                             <Undo2 size={11} /> Undo
                           </button>
                         </div>
@@ -257,14 +257,14 @@ export default function PriceChangesPage() {
                         <div className="flex flex-col items-end gap-1">
                           {a.atLoss ? <Badge tone="danger">Selling at a loss</Badge> : <Badge tone="warning">Raise price?</Badge>}
                           {!a.atLoss && suggestion !== null && suggestion > (r.products?.price ?? 0) && (
-                            <span className="text-[11px] text-ink-faint whitespace-nowrap">
+                            <span className="text-[0.6875rem] text-ink-faint whitespace-nowrap">
                               same margin ≈ {formatPeso(suggestion)}
                             </span>
                           )}
                           <button
                             onClick={() => setReviewed(r, true)}
                             title="I've checked this — the price is fine as it is"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline whitespace-nowrap"
+                            className="inline-flex items-center gap-1 text-[0.6875rem] font-semibold text-primary hover:underline whitespace-nowrap"
                           >
                             <Check size={11} /> Mark as reviewed
                           </button>
@@ -310,7 +310,7 @@ function Chip({ active, onClick, label, count, tone }: { active: boolean; onClic
 
 function Badge({ tone, children }: { tone: 'warning' | 'danger'; children: React.ReactNode }) {
   return (
-    <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${
+    <span className={`inline-block text-[0.6875rem] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${
       tone === 'danger' ? 'bg-danger-soft text-danger' : 'bg-warning-soft text-warning'
     }`}>
       {children}

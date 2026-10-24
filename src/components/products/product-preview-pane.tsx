@@ -21,16 +21,23 @@ const emptyForm = (barcode?: string): ProductPayload => ({
   price: 0, cost: 0, stocks: 0, low_stock_threshold: 5, is_active: true,
 })
 
+const formOf = (p: Product): ProductPayload => ({
+  name: p.name, sku: p.sku, barcode: p.barcode, volume: p.volume,
+  category_id: p.category_id, price: p.price, cost: p.cost,
+  stocks: p.stocks, low_stock_threshold: p.low_stock_threshold, is_active: p.is_active,
+})
+
+const sameForm = (a: ProductPayload, b: ProductPayload) =>
+  (Object.keys(a) as (keyof ProductPayload)[]).every(k => (a[k] ?? null) === (b[k] ?? null))
+
 export default function ProductPreviewPane({ mode, product, categories, prefillBarcode, onSaved, onDeleted }: Props) {
-  const [form, setForm] = useState<ProductPayload>(() =>
-    product
-      ? {
-          name: product.name, sku: product.sku, barcode: product.barcode, volume: product.volume,
-          category_id: product.category_id, price: product.price, cost: product.cost,
-          stocks: product.stocks, low_stock_threshold: product.low_stock_threshold, is_active: product.is_active,
-        }
-      : emptyForm(prefillBarcode)
-  )
+  const [form, setForm] = useState<ProductPayload>(() => (product ? formOf(product) : emptyForm(prefillBarcode)))
+  // What's currently stored in the database (null = not saved yet). The save
+  // button is only "live" when the form differs from this, so it's obvious
+  // whether the changes went through.
+  const [savedForm, setSavedForm] = useState<ProductPayload | null>(() => (product ? formOf(product) : null))
+  const [justSaved, setJustSaved] = useState(false)
+  const dirty = savedForm === null || !sameForm(form, savedForm)
   const [saving, setSaving] = useState(false)
   // Two-step delete: first click arms it, second click deletes.
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -51,6 +58,7 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
 
   function set<K extends keyof ProductPayload>(key: K, value: ProductPayload[K]) {
     setForm(f => ({ ...f, [key]: value }))
+    setJustSaved(false)
   }
 
   async function handleSave() {
@@ -65,7 +73,12 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
         ? await createProduct(form, categoryName)
         : await updateProduct(product!.id, form)
       toast.success(mode === 'create' ? 'Product created' : 'Saved')
-      onSaved(saved as unknown as Product)
+      const savedProduct = saved as unknown as Product
+      const stored = formOf(savedProduct)
+      setForm(stored)
+      setSavedForm(stored)
+      setJustSaved(true)
+      onSaved(savedProduct)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not save')
     } finally {
@@ -89,18 +102,18 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
       </div>
 
       <Field label="Name">
-        <input value={form.name} onChange={e => set('name', e.target.value)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary" autoFocus />
+        <input value={form.name} onChange={e => set('name', e.target.value)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary" autoFocus />
       </Field>
 
       <div className="flex gap-3">
         <Field label="Volume">
-          <input value={form.volume ?? ''} onChange={e => set('volume', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary" />
+          <input value={form.volume ?? ''} onChange={e => set('volume', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary" />
         </Field>
         <Field label="Category">
           <select
             value={form.category_id ?? ''}
             onChange={e => set('category_id', e.target.value || null)}
-            className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary"
+            className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary"
           >
             <option value="">Uncategorized</option>
             {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -110,38 +123,46 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
 
       <div className="flex gap-3">
         <Field label="Price">
-          <NumberInput value={form.price} onValueChange={v => set('price', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.price} onValueChange={v => set('price', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
         <Field label="Cost">
-          <NumberInput value={form.cost} onValueChange={v => set('cost', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.cost} onValueChange={v => set('cost', v)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
       </div>
 
       <div className="flex gap-3">
         <Field label="Stocks">
-          <NumberInput value={form.stocks} onValueChange={v => set('stocks', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.stocks} onValueChange={v => set('stocks', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
         <Field label="Low stock at">
-          <NumberInput value={form.low_stock_threshold} onValueChange={v => set('low_stock_threshold', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
+          <NumberInput value={form.low_stock_threshold} onValueChange={v => set('low_stock_threshold', v)} decimals={false} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary tabular" />
         </Field>
       </div>
 
       <div className="flex gap-3">
         <Field label="Barcode (optional)">
-          <input value={form.barcode ?? ''} onChange={e => set('barcode', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary" placeholder="Optional" />
+          <input data-barcode-input value={form.barcode ?? ''} onChange={e => set('barcode', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary" placeholder="Optional" />
         </Field>
         <Field label="SKU">
-          <input value={form.sku ?? ''} onChange={e => set('sku', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[13px] font-semibold text-ink w-full outline-none focus-visible:border-primary" placeholder="Auto-generated" />
+          <input value={form.sku ?? ''} onChange={e => set('sku', e.target.value || null)} className="rounded-lg border border-border bg-canvas px-2.5 py-2 text-[0.8125rem] font-semibold text-ink w-full outline-none focus-visible:border-primary" placeholder="Auto-generated" />
         </Field>
       </div>
 
       <button
         onClick={handleSave}
-        disabled={saving}
-        className="w-full flex items-center justify-center gap-2 rounded-xl bg-primary text-white font-bold py-3 mt-1 disabled:opacity-60"
+        disabled={saving || !dirty}
+        className={`w-full flex items-center justify-center gap-2 rounded-xl font-bold py-3 mt-1 transition-colors ${
+          dirty
+            ? 'bg-primary text-white disabled:opacity-60'
+            : 'bg-surface-sunken text-ink-faint border border-border cursor-default'
+        }`}
       >
         <Check size={16} />
-        {saving ? 'Saving…' : mode === 'create' ? 'Create product' : 'Save changes'}
+        {saving
+          ? 'Saving…'
+          : !dirty
+            ? (justSaved ? 'Saved' : 'No changes')
+            : mode === 'create' ? 'Create product' : 'Save changes'}
       </button>
 
       {mode === 'edit' && product && (
@@ -176,7 +197,7 @@ export default function ProductPreviewPane({ mode, product, categories, prefillB
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex-1 flex flex-col gap-1 min-w-0">
-      <label className="text-[10px] font-bold text-ink-faint uppercase tracking-wide">{label}</label>
+      <label className="text-[0.625rem] font-bold text-ink-faint uppercase tracking-wide">{label}</label>
       {children}
     </div>
   )

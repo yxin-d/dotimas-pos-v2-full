@@ -61,7 +61,7 @@ export default function CustomItemModal({ onClose }: Props) {
         <button onClick={handleAdd} className="w-full rounded-xl bg-primary text-white font-bold py-2.5 text-sm">
           Add to cart
         </button>
-        <p className="text-[11px] text-ink-faint text-center">Shortcut: press <kbd className="px-1 py-0.5 rounded bg-surface-sunken border border-border">F2</kbd> anytime on the POS screen</p>
+        <p className="text-[0.6875rem] text-ink-faint text-center">Shortcut: press <kbd className="px-1 py-0.5 rounded bg-surface-sunken border border-border">F2</kbd> anytime on the POS screen</p>
       </div>
     </div>
   )

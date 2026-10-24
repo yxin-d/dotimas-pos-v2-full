@@ -21,7 +21,7 @@ export default function Badge({ children, tone = 'neutral', className = '' }: Ba
     <span
       className={`
         inline-flex items-center gap-1 px-2 py-0.5 rounded-full
-        text-[11px] font-semibold tracking-wide
+        text-[0.6875rem] font-semibold tracking-wide
         ${toneClasses[tone]} ${className}
       `}
     >

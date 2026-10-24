@@ -9,42 +9,51 @@ interface Props {
   item: CartItemType
 }
 
+// Sized for fingers on the store tablet: the +/− buttons are 44px squares
+// (they were 24px), and the name, size and amounts are large enough to read
+// at arm's length.
 export default function CartItem({ item }: Props) {
   const { updateQty, removeItem } = useCart()
   const { product, qty, subtotal, customPrice } = item
 
   return (
-    <div className="flex items-start gap-2 py-2 border-b border-border last:border-0">
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-ink truncate">{product.name}</p>
-        <p className="text-xs text-ink-faint tabular">{formatPeso(customPrice ?? product.price)} each</p>
+    <div className="py-2.5 border-b border-border last:border-0">
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-base font-semibold text-ink leading-snug line-clamp-2">{product.name}</p>
+          <p className="text-sm text-ink-soft tabular">
+            {product.volume ? `${product.volume} · ` : ''}{formatPeso(customPrice ?? product.price)} each
+          </p>
+        </div>
+        <button
+          onClick={() => removeItem(product.id)}
+          aria-label={`Remove ${product.name}`}
+          className="w-9 h-9 -mt-1 -mr-1 rounded-lg text-ink-faint hover:text-danger hover:bg-danger-soft flex items-center justify-center transition-colors shrink-0"
+        >
+          <X size={18} />
+        </button>
       </div>
 
-      <div className="flex flex-col items-end gap-1 shrink-0">
-        <span className="text-sm font-semibold text-ink tabular">{formatPeso(subtotal)}</span>
-
+      <div className="flex items-center justify-between mt-2">
         {/* Qty controls — no stock ceiling; stock is advisory only in V2 */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={() => updateQty(product.id, qty - 1)}
-            className="w-6 h-6 rounded-md bg-surface-sunken hover:bg-border flex items-center justify-center transition-colors"
+            aria-label="One less"
+            className="w-11 h-11 rounded-xl bg-surface-sunken hover:bg-border active:scale-95 flex items-center justify-center transition-all"
           >
-            <Minus size={10} />
+            <Minus size={18} />
           </button>
-          <span className="w-6 text-center text-sm font-medium tabular">{qty}</span>
+          <span className="min-w-10 text-center text-lg font-bold text-ink tabular">{qty}</span>
           <button
             onClick={() => updateQty(product.id, qty + 1)}
-            className="w-6 h-6 rounded-md bg-surface-sunken hover:bg-border flex items-center justify-center transition-colors"
+            aria-label="One more"
+            className="w-11 h-11 rounded-xl bg-surface-sunken hover:bg-border active:scale-95 flex items-center justify-center transition-all"
           >
-            <Plus size={10} />
-          </button>
-          <button
-            onClick={() => removeItem(product.id)}
-            className="w-6 h-6 rounded-md hover:bg-danger-soft text-ink-faint hover:text-danger flex items-center justify-center transition-colors ml-1"
-          >
-            <X size={10} />
+            <Plus size={18} />
           </button>
         </div>
+        <span className="text-lg font-bold text-ink tabular">{formatPeso(subtotal)}</span>
       </div>
     </div>
   )
