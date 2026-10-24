@@ -14,6 +14,23 @@ interface InvoiceRow {
   payment_method: string
   is_credit: boolean
   customers: { name: string } | null
+  sales: { subtotal: number; category_name: string | null }[] | null
+}
+
+type Kind = 'all' | 'meals' | 'store'
+
+// Meals = lines from the Meals category; Store = everything else (including
+// custom items). A sale with both is split line by line.
+const isMeal = (category: string | null) => category?.toLowerCase() === 'meals'
+
+function splitOf(inv: InvoiceRow) {
+  let meals = 0
+  let store = 0
+  for (const l of inv.sales ?? []) {
+    if (isMeal(l.category_name)) meals += Number(l.subtotal)
+    else store += Number(l.subtotal)
+  }
+  return { meals, store }
 }
 
 interface SaleLine {
@@ -32,6 +49,7 @@ export default function SalesPage() {
   const [dateFrom, setDateFrom]     = useState(todayPH())
   const [dateTo, setDateTo]         = useState(todayPH())
   const [search, setSearch]         = useState('')
+  const [kind, setKind]             = useState<Kind>('all')
   const [clientReady, setClientReady] = useState(false) // 👈 new state
   const supabaseRef = useRef<any>(null)
 
@@ -50,7 +68,7 @@ export default function SalesPage() {
       try {
         const { data, error } = await supabaseRef.current
           .from('sale_invoice')
-          .select('*, customers(name)')
+          .select('*, customers(name), sales(subtotal, category_name)')
           .gte('created_at', `${dateFrom}T00:00:00+08:00`)
           .lte('created_at', `${dateTo}T23:59:59.999+08:00`)
           .order('created_at', { ascending: false })
@@ -97,14 +115,25 @@ export default function SalesPage() {
   }
 
   // Client-side filter by customer name or invoice ID
-  const filtered = search.trim()
+  const searched = search.trim()
     ? invoices.filter(i =>
         i.customers?.name?.toLowerCase().includes(search.toLowerCase()) ||
         i.id.toLowerCase().includes(search.toLowerCase())
       )
     : invoices
 
-  const totalSales  = filtered.reduce((s, i) => s + i.total_amount, 0)
+  const splits = new Map(searched.map(i => [i.id, splitOf(i)]))
+  const mealsTotal = searched.reduce((s, i) => s + splits.get(i.id)!.meals, 0)
+  const storeTotal = searched.reduce((s, i) => s + splits.get(i.id)!.store, 0)
+
+  // Meals / Store filter: sales that include at least one line of that kind
+  const filtered = kind === 'all'
+    ? searched
+    : searched.filter(i => splits.get(i.id)![kind] > 0)
+
+  const totalSales  = kind === 'meals' ? mealsTotal
+                    : kind === 'store' ? storeTotal
+                    : filtered.reduce((s, i) => s + i.total_amount, 0)
   const creditCount = filtered.filter(i => i.is_credit).length
 
   return (
@@ -113,7 +142,9 @@ export default function SalesPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-ink">Sales history</h1>
-          <p className="text-xs text-ink-faint mt-0.5">{filtered.length} invoices · {formatPeso(totalSales)} total</p>
+          <p className="text-xs text-ink-faint mt-0.5">
+            {filtered.length} invoices · {formatPeso(totalSales)} {kind === 'all' ? 'total' : kind === 'meals' ? 'from meals' : 'from store items'}
+          </p>
         </div>
       </div>
 
@@ -131,6 +162,19 @@ export default function SalesPage() {
             className="border border-border rounded-xl px-3 py-2 text-sm text-ink bg-surface
               focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary" />
         </div>
+        <div className="flex rounded-xl border border-border bg-surface p-0.5">
+          {(['all', 'meals', 'store'] as Kind[]).map(k => (
+            <button
+              key={k}
+              onClick={() => setKind(k)}
+              className={`px-3.5 py-1.5 rounded-lg text-sm font-semibold transition-colors ${
+                kind === k ? 'bg-primary text-white' : 'text-ink-soft hover:bg-surface-sunken'
+              }`}
+            >
+              {k === 'all' ? 'All' : k === 'meals' ? 'Meals' : 'Store'}
+            </button>
+          ))}
+        </div>
         <div className="relative flex-1 min-w-[160px]">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint" />
           <input type="text" placeholder="Search customer or invoice ID…" value={search}
@@ -142,8 +186,10 @@ export default function SalesPage() {
 
       {/* Summary chips */}
       {!loading && (
-        <div className="flex gap-3 mb-5">
-          <Chip label="Total sales" value={formatPeso(totalSales)} />
+        <div className="flex flex-wrap gap-3 mb-5">
+          <Chip label="Total sales" value={formatPeso(mealsTotal + storeTotal)} />
+          <Chip label="Meals" value={formatPeso(mealsTotal)} highlight={kind === 'meals'} />
+          <Chip label="Store items" value={formatPeso(storeTotal)} highlight={kind === 'store'} />
           <Chip label="Transactions" value={String(filtered.length)} />
           {creditCount > 0 && <Chip label="On credit" value={String(creditCount)} accent />}
         </div>
@@ -172,6 +218,7 @@ export default function SalesPage() {
                       <span className="text-xs tabular font-mono text-ink-faint">
                         #{inv.id.slice(0, 8).toUpperCase()}
                       </span>
+                      <KindTag split={splits.get(inv.id)!} />
                       {inv.is_credit && (
                         <span className="text-[0.625rem] font-bold bg-gold-soft text-gold px-1.5 py-0.5 rounded-full">
                           UTANG
@@ -226,9 +273,25 @@ export default function SalesPage() {
   )
 }
 
-function Chip({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+function KindTag({ split }: { split: { meals: number; store: number } }) {
+  if (split.meals > 0 && split.store > 0) {
+    return (
+      <span className="text-[0.625rem] font-bold bg-surface-sunken text-ink-soft px-1.5 py-0.5 rounded-full">
+        MEALS {formatPeso(split.meals)} + STORE {formatPeso(split.store)}
+      </span>
+    )
+  }
+  if (split.meals > 0) {
+    return <span className="text-[0.625rem] font-bold bg-primary-soft text-primary px-1.5 py-0.5 rounded-full">MEALS</span>
+  }
+  return null
+}
+
+function Chip({ label, value, accent, highlight }: { label: string; value: string; accent?: boolean; highlight?: boolean }) {
   return (
-    <div className={`px-3 py-2 rounded-xl border text-sm ${accent ? 'bg-gold-soft border-gold/20' : 'bg-surface border-border'}`}>
+    <div className={`px-3 py-2 rounded-xl border text-sm ${
+      accent ? 'bg-gold-soft border-gold/20' : highlight ? 'bg-primary-soft border-primary/30' : 'bg-surface border-border'
+    }`}>
       <span className="text-ink-faint text-xs">{label} </span>
       <span className={`font-bold tabular ${accent ? 'text-gold' : 'text-ink'}`}>{value}</span>
     </div>

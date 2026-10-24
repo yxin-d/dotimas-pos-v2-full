@@ -3,13 +3,22 @@
 import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { formatPeso } from '@/lib/utils/currency';
-import { AlertTriangle, Wallet, Receipt, ChevronLeft, ChevronRight } from 'lucide-react';
+import { AlertTriangle, Wallet, Receipt, ChevronLeft, ChevronRight, UtensilsCrossed, ShoppingBasket } from 'lucide-react';
+import { manilaDate } from '@/lib/utils/date';
 import { toast } from 'sonner';
 
 interface DailyStats {
   gross_sales?: number;
   invoice_count?: number;
   credit_given?: number;
+}
+
+// Today's sales split: Meals category vs everything else (store items).
+interface CategoryStats {
+  meals_sales?: number;
+  store_sales?: number;
+  meals_invoices?: number;
+  store_invoices?: number;
 }
 
 interface LowStockItem {
@@ -36,6 +45,7 @@ interface ProductWithCategory {
 
 export default function DashboardPage() {
   const [dailyStats, setDailyStats] = useState<DailyStats>({});
+  const [categoryStats, setCategoryStats] = useState<CategoryStats>({});
   const [lowStockItems, setLowStockItems] = useState<LowStockItem[]>([]);
   const [creditSummary, setCreditSummary] = useState<CreditItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,12 +62,14 @@ export default function DashboardPage() {
     const fetchData = async () => {
       setLoading(true);
 
-      // 1. Daily stats
-      const { data: daily } = await supabaseRef.current
-        .from('daily_summary')
-        .select('*')
-        .order('sale_date', { ascending: false })
-        .limit(1);
+      // 1. Today's stats (Manila date). Before, this took the latest day that
+      // had sales — so the "today" cards showed yesterday's numbers until the
+      // first sale of the day.
+      const today = manilaDate();
+      const [{ data: daily }, { data: split }] = await Promise.all([
+        supabaseRef.current.from('daily_summary').select('*').eq('sale_date', today).limit(1),
+        supabaseRef.current.from('daily_category_sales').select('*').eq('sale_date', today).limit(1),
+      ]);
 
       // 2. Products with category – explicitly type the result
       const { data: products, error: productsError } = await supabaseRef.current
@@ -79,7 +91,7 @@ export default function DashboardPage() {
       // Filter low stock: stocks <= threshold AND category is NOT 'meals'
       const lowStock = typedProducts
         .filter(p => p.stocks <= p.low_stock_threshold)
-        .filter(p => p.product_categories?.name !== 'meals')
+        .filter(p => p.product_categories?.name?.toLowerCase() !== 'meals')
         .map(p => ({
           id: p.id,
           name: p.name,
@@ -95,6 +107,7 @@ export default function DashboardPage() {
         .order('credit_balance', { ascending: false });
 
       if (daily && daily.length > 0) setDailyStats(daily[0]);
+      if (split && split.length > 0) setCategoryStats(split[0]);
       setLowStockItems(lowStock);
       setCreditSummary(credit || []);
       setLoading(false);
@@ -124,6 +137,20 @@ export default function DashboardPage() {
       tone: 'text-ink',
     },
     {
+      label: 'Meals (today)',
+      value: formatPeso(categoryStats.meals_sales),
+      sub: `${categoryStats.meals_invoices ?? 0} sales`,
+      icon: UtensilsCrossed,
+      tone: 'text-primary',
+    },
+    {
+      label: 'Store items (today)',
+      value: formatPeso(categoryStats.store_sales),
+      sub: `${categoryStats.store_invoices ?? 0} sales`,
+      icon: ShoppingBasket,
+      tone: 'text-ink',
+    },
+    {
       label: 'Invoices (today)',
       value: (dailyStats.invoice_count ?? 0).toString(),
       icon: Receipt,
@@ -140,8 +167,8 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="p-6 max-w-7xl mx-auto">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {Array.from({ length: 3 }).map((_, i) => (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-24 bg-surface rounded-2xl border border-border animate-pulse" />
           ))}
         </div>
@@ -151,15 +178,16 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      {/* Stats grid – now 3 columns */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-        {stats.map(({ label, value, icon: Icon, tone }) => (
+      {/* Stats grid */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+        {stats.map(({ label, value, sub, icon: Icon, tone }: { label: string; value: string; sub?: string; icon: typeof Receipt; tone: string }) => (
           <div key={label} className="bg-surface p-4 rounded-2xl border border-border">
             <div className="flex items-center justify-between mb-2">
               <p className="text-xs font-medium text-ink-faint">{label}</p>
               <Icon size={14} className="text-ink-faint" strokeWidth={1.75} />
             </div>
             <p className={`text-2xl font-bold tabular ${tone}`}>{value}</p>
+            {sub && <p className="text-xs text-ink-faint mt-0.5">{sub}</p>}
           </div>
         ))}
       </div>

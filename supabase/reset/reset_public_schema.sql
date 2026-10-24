@@ -13,6 +13,7 @@ begin;
 
 drop trigger if exists on_auth_user_created on auth.users;
 
+drop view if exists public.daily_category_sales;
 drop view if exists public.daily_summary;
 drop view if exists public.credit_summary;
 
@@ -51,6 +52,7 @@ drop function if exists public.deduct_stock_on_sale() cascade;
 drop function if exists public.business_date(timestamptz) cascade;
 drop function if exists public.delete_customer(uuid) cascade;
 drop function if exists public.log_product_price_change() cascade;
+drop function if exists public.set_sale_category() cascade;
 
 drop type if exists payment_method_type cascade;
 drop type if exists ledger_entry_type cascade;
