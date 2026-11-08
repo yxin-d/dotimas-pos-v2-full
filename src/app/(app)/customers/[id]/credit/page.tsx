@@ -4,14 +4,14 @@ import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
-import { formatPeso, formatDate } from '@/lib/utils/currency';
+import { formatPeso, formatDate, todayPH } from '@/lib/utils/currency';
 import { printStatement, downloadStatementXlsx } from '@/lib/utils/statement';
 import { toast } from 'sonner';
 import { ArrowLeft, Pencil, Trash2, Printer, FileDown, Archive, RotateCcw } from 'lucide-react';
 import Input from '@/src/components/ui/input';
 import Button from '@/src/components/ui/button';
 import Modal from '@/src/components/ui/modal';
-import { recordCreditChange, updateCustomer, deleteCustomer, restoreCustomer } from '../../action';
+import { recordCreditChange, updateCustomer, deleteCustomer, restoreCustomer, type CreditEntryType } from '../../action';
 import type { Customer } from '@/types/database';
 
 interface LedgerRow {
@@ -23,7 +23,38 @@ interface LedgerRow {
   created_at: string;
 }
 
-type Mode = 'payment_made' | 'credit_given';
+type Mode = CreditEntryType;
+
+const MODE_COPY: Record<Mode, { hint: string; placeholder: string; button: string; defaultNote: string; toast: string }> = {
+  payment_made: {
+    hint: 'Customer paid down some or all of their outstanding credit.',
+    placeholder: 'Amount paid',
+    button: 'Confirm payment',
+    defaultNote: 'Payment received',
+    toast: 'Payment recorded',
+  },
+  credit_given: {
+    hint: 'Add to what the customer owes — for utang made outside the POS (e.g. logged after the fact).',
+    placeholder: 'Amount to add',
+    button: 'Add balance',
+    defaultNote: 'Credit added',
+    toast: 'Balance added',
+  },
+  credit_removed: {
+    hint: 'Take credit off their balance without recording a payment — e.g. utang that was already paid, or logged by mistake. The entry stays in the history.',
+    placeholder: 'Amount to remove',
+    button: 'Remove credit',
+    defaultNote: 'Credit removed',
+    toast: 'Credit removed',
+  },
+};
+
+const TYPE_LABEL: Record<string, string> = {
+  credit_given: 'Credit given',
+  payment_made: 'Payment made',
+  opening_balance: 'Opening balance',
+  credit_removed: 'Credit removed',
+};
 
 export default function CustomerCreditPage() {
   const { id } = useParams<{ id: string }>();
@@ -35,6 +66,7 @@ export default function CustomerCreditPage() {
   const [mode, setMode] = useState<Mode>('payment_made');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [date, setDate] = useState(todayPH());
   const [saving, setSaving] = useState(false);
 
   const [editOpen, setEditOpen] = useState(false);
@@ -55,7 +87,7 @@ export default function CustomerCreditPage() {
     const supabase = createClient();
     const [{ data: cust }, { data: entries }, { data: setting }] = await Promise.all([
       supabase.from('customers').select('*').eq('id', id).maybeSingle(),
-      supabase.from('ledger').select('*').eq('customer_id', id).order('created_at', { ascending: false }),
+      supabase.from('ledger').select('*').eq('customer_id', id).order('created_at', { ascending: false }).order('entry_seq', { ascending: false }),
       supabase.from('app_settings').select('value').eq('key', 'store_name').maybeSingle(),
     ]);
     if (!cust) {
@@ -86,19 +118,16 @@ export default function CustomerCreditPage() {
     if (!id || Array.isArray(id)) return;
 
     setSaving(true);
-    const { error } = await recordCreditChange(
-      id,
-      mode,
-      value,
-      note || (mode === 'payment_made' ? 'Payment received' : 'Credit added')
-    );
+    const copy = MODE_COPY[mode];
+    const { error } = await recordCreditChange(id, mode, value, note || copy.defaultNote, date || undefined);
 
     if (error) {
       toast.error(error);
     } else {
-      toast.success(mode === 'payment_made' ? 'Payment recorded' : 'Balance added');
+      toast.success(copy.toast);
       setAmount('');
       setNote('');
+      setDate(todayPH());
       fetchData();
     }
     setSaving(false);
@@ -271,12 +300,18 @@ export default function CustomerCreditPage() {
           >
             Add balance
           </button>
+          <button
+            onClick={() => setMode('credit_removed')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              mode === 'credit_removed'
+                ? 'bg-ink text-white border-ink'
+                : 'bg-surface text-ink-soft border-border hover:border-ink'
+            }`}
+          >
+            Remove credit
+          </button>
         </div>
-        <p className="text-xs text-ink-faint mb-3">
-          {mode === 'payment_made'
-            ? 'Customer paid down some or all of their outstanding credit.'
-            : "Add to what the customer owes — for utang made outside the POS (e.g. logged after the fact)."}
-        </p>
+        <p className="text-xs text-ink-faint mb-3">{MODE_COPY[mode].hint}</p>
 
         <div className="flex flex-wrap gap-3 items-start">
           <div className="w-40">
@@ -284,12 +319,22 @@ export default function CustomerCreditPage() {
               type="text"
               inputMode="decimal"
               autoComplete="off"
-              placeholder={mode === 'payment_made' ? 'Amount paid' : 'Amount to add'}
+              placeholder={MODE_COPY[mode].placeholder}
               prefix="₱"
               value={amount}
               onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))}
               onFocus={(e) => e.currentTarget.select()}
               className="tabular"
+            />
+          </div>
+          <div className="w-44">
+            <Input
+              type="date"
+              aria-label="Date of transaction"
+              title="Date it happened — defaults to today"
+              value={date}
+              max={todayPH()}
+              onChange={(e) => setDate(e.target.value)}
             />
           </div>
           <div className="flex-1 min-w-[150px]">
@@ -301,8 +346,16 @@ export default function CustomerCreditPage() {
             />
           </div>
           <Button onClick={handleSubmit} disabled={saving}>
-            {saving ? 'Saving…' : mode === 'payment_made' ? 'Confirm payment' : 'Add balance'}
+            {saving ? 'Saving…' : MODE_COPY[mode].button}
           </Button>
+        </div>
+        <div className="mt-2 flex items-center gap-3 text-xs text-ink-faint">
+          {mode !== 'credit_given' && customer.credit_balance > 0 && (
+            <button type="button" onClick={() => setAmount(String(customer.credit_balance))} className="text-primary hover:underline">
+              Use full balance ({formatPeso(customer.credit_balance)})
+            </button>
+          )}
+          {date !== todayPH() && <span>Will be recorded on {formatDate(`${date}T12:00:00+08:00`)}.</span>}
         </div>
       </div>
 
@@ -330,8 +383,8 @@ export default function CustomerCreditPage() {
               ledger.map((row) => (
                 <tr key={row.id} className="hover:bg-surface-sunken/60 transition-colors">
                   <td className="px-4 py-3 text-sm text-ink-soft tabular">{formatDate(row.created_at)}</td>
-                  <td className="px-4 py-3 text-sm capitalize text-ink">{row.entry_type.replace('_', ' ')}</td>
-                  <td className={`px-4 py-3 text-sm font-medium tabular ${row.entry_type === 'payment_made' ? 'text-primary' : 'text-gold'}`}>
+                  <td className="px-4 py-3 text-sm text-ink">{TYPE_LABEL[row.entry_type] ?? row.entry_type}</td>
+                  <td className={`px-4 py-3 text-sm font-medium tabular ${row.entry_type === 'payment_made' || row.entry_type === 'credit_removed' ? 'text-primary' : 'text-gold'}`}>
                     {formatPeso(row.amount)}
                   </td>
                   <td className="px-4 py-3 text-sm tabular text-ink">{formatPeso(row.running_balance)}</td>
