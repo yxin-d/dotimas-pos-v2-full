@@ -19,7 +19,7 @@ import { formatPeso, formatDate } from '@/lib/utils/currency'
 import { manilaDate } from '@/lib/utils/date'
 import { wordsFilter } from '@/lib/utils/search'
 import CategoryGrid, { ALL_PRODUCTS, UNCATEGORIZED } from './category-grid'
-import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, X, Receipt as ReceiptIcon } from 'lucide-react'
+import { Search, PowerOff, Scan, Ban, Menu, EyeOff, Lock, ArrowLeft, AlertTriangle, Wallet, X, Receipt as ReceiptIcon, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import PosNavDrawer from './pos-nav-drawer'
 import type { Product, ProductCategory, PosSession } from '@/types/database'
@@ -258,6 +258,15 @@ export default function PosClient({ session, categories }: Props) {
           >
             <ReceiptIcon size={14} />
             <span className="hidden sm:inline">Auto-receipt</span>
+          </button>
+          {/* On-screen way in to the custom item (F2 is keyboard-only, and the tablet has none) */}
+          <button
+            onClick={() => setActiveModal('customItem')}
+            title="Add a custom item with its own price (F2)"
+            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl border border-gold/40 bg-gold-soft text-gold text-xs font-bold hover:border-gold transition-colors"
+          >
+            <Zap size={14} />
+            <span>Custom item</span>
           </button>
           <button
             onClick={() => setActiveModal('priceChecker')}
