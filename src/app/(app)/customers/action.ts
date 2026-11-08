@@ -2,6 +2,7 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { todayPH } from '@/lib/utils/currency'
 
 // Routes every manual credit ledger change through the same atomic
 // record_credit_change() RPC the POS checkout uses for credit sales. The
@@ -12,12 +13,35 @@ import { revalidatePath } from 'next/cache'
 // in one atomic step, same as everywhere else in the app.
 //
 // Errors are returned, not thrown — see the NOTE in pos/action.ts for why.
+//
+// `occurredOn` (YYYY-MM-DD, Manila) is when the transaction really happened.
+// Omit it, or pass today, to stamp it with the current time. A past date is
+// stored at noon Manila time so it can't slip across midnight into the wrong
+// day. Future dates are rejected.
+//
+// 'credit_removed' takes credit off the balance without counting as a payment
+// (utang that was already paid, or logged by mistake).
+export type CreditEntryType = 'payment_made' | 'credit_given' | 'credit_removed'
+
 export async function recordCreditChange(
   customerId: string,
-  entryType: 'payment_made' | 'credit_given',
+  entryType: CreditEntryType,
   amount: number,
-  description?: string
+  description?: string,
+  occurredOn?: string
 ): Promise<{ balance: number | null; error: string | null }> {
+  let createdAt: string | null = null
+  if (occurredOn) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(occurredOn)) return { balance: null, error: 'Invalid date' }
+    const today = todayPH()
+    if (occurredOn > today) return { balance: null, error: 'The date can\'t be in the future' }
+    if (occurredOn < today) {
+      const d = new Date(`${occurredOn}T12:00:00+08:00`)
+      if (isNaN(d.getTime())) return { balance: null, error: 'Invalid date' }
+      createdAt = d.toISOString()
+    }
+  }
+
   const supabase = await createClient()
 
   const { data, error } = await supabase.rpc('record_credit_change', {
@@ -26,6 +50,7 @@ export async function recordCreditChange(
     p_entry_type: entryType,
     p_amount: amount,
     p_description: description?.trim() || null,
+    p_created_at: createdAt,
   })
 
   if (error) return { balance: null, error: error.message }

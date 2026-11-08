@@ -25,15 +25,23 @@ const TYPE_LABEL: Record<string, string> = {
   credit_given: 'Credit (utang)',
   payment_made: 'Payment',
   opening_balance: 'Opening balance',
+  credit_removed: 'Credit removed',
 }
+
+/** Entries that lower what the customer owes. */
+const reduces = (t: string) => t === 'payment_made' || t === 'credit_removed'
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 }
 
-/** Oldest first, the way a statement reads. */
+/** Oldest first, the way a statement reads. Entries arrive newest-first, so
+ *  ties on the timestamp are broken by reversing their incoming order. */
 function chronological(entries: StatementEntry[]): StatementEntry[] {
-  return [...entries].sort((a, b) => a.created_at.localeCompare(b.created_at))
+  return entries
+    .map((e, i) => [e, i] as const)
+    .sort((a, b) => a[0].created_at.localeCompare(b[0].created_at) || b[1] - a[1])
+    .map(([e]) => e)
 }
 
 function fileSafe(s: string): string {
@@ -42,8 +50,9 @@ function fileSafe(s: string): string {
 
 export function printStatement(customer: StatementCustomer, entries: StatementEntry[], storeName: string): boolean {
   const rows = chronological(entries)
-  const totalCredit = rows.filter(r => r.entry_type !== 'payment_made').reduce((s, r) => s + r.amount, 0)
+  const totalCredit = rows.filter(r => !reduces(r.entry_type)).reduce((s, r) => s + r.amount, 0)
   const totalPaid = rows.filter(r => r.entry_type === 'payment_made').reduce((s, r) => s + r.amount, 0)
+  const totalRemoved = rows.filter(r => r.entry_type === 'credit_removed').reduce((s, r) => s + r.amount, 0)
 
   const body = rows.length === 0
     ? `<tr><td colspan="5" class="empty">No transactions yet.</td></tr>`
@@ -51,7 +60,7 @@ export function printStatement(customer: StatementCustomer, entries: StatementEn
         <tr>
           <td>${escapeHtml(formatDate(r.created_at, true))}</td>
           <td>${escapeHtml(TYPE_LABEL[r.entry_type] ?? r.entry_type)}</td>
-          <td class="num ${r.entry_type === 'payment_made' ? 'paid' : 'owed'}">${r.entry_type === 'payment_made' ? '−' : '+'}${escapeHtml(formatPeso(r.amount))}</td>
+          <td class="num ${reduces(r.entry_type) ? 'paid' : 'owed'}">${reduces(r.entry_type) ? '−' : '+'}${escapeHtml(formatPeso(r.amount))}</td>
           <td class="num">${escapeHtml(formatPeso(r.running_balance))}</td>
           <td>${escapeHtml(r.description ?? '')}</td>
         </tr>`).join('')
@@ -96,6 +105,7 @@ export function printStatement(customer: StatementCustomer, entries: StatementEn
   <div class="summary">
     <div>Total credit<b>${escapeHtml(formatPeso(totalCredit))}</b></div>
     <div>Total paid<b>${escapeHtml(formatPeso(totalPaid))}</b></div>
+    ${totalRemoved > 0 ? `<div>Credit removed<b>${escapeHtml(formatPeso(totalRemoved))}</b></div>` : ''}
     <div class="balance">Balance due<b>${escapeHtml(formatPeso(customer.credit_balance))}</b></div>
   </div>
   <table>
@@ -129,7 +139,7 @@ export async function downloadStatementXlsx(customer: StatementCustomer, entries
     ...rows.map(r => [
       formatDate(r.created_at, true),
       TYPE_LABEL[r.entry_type] ?? r.entry_type,
-      r.entry_type === 'payment_made' ? -r.amount : r.amount,
+      reduces(r.entry_type) ? -r.amount : r.amount,
       r.running_balance,
       r.description ?? '',
     ]),

@@ -2,7 +2,7 @@
 // in sync with the DB — if a migration changes a column, update it here too.
 
 export type PaymentMethod = 'cash' | 'gcash' | 'maya' | 'mixed' | 'credit'
-export type LedgerEntryType = 'credit_given' | 'payment_made' | 'opening_balance'
+export type LedgerEntryType = 'credit_given' | 'payment_made' | 'opening_balance' | 'credit_removed'
 export type InvoiceStatus = 'completed' | 'voided'
 export type GcashDirection = 'received' | 'sent'
 export type GcashSubmissionStatus = 'pending' | 'confirmed' | 'rejected'
