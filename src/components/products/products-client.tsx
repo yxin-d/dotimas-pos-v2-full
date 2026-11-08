@@ -171,7 +171,7 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
   }
 
   return (
-    <div className="p-6 flex flex-col gap-4">
+    <div className="p-4 sm:p-6 flex flex-col gap-4">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-xl font-extrabold text-ink">Products</h1>
         <div className="flex items-center gap-2 flex-wrap">
@@ -260,16 +260,16 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                 <span className="flex-1">
                   Select all {products.length} shown{search || categoryFilter || statusFilter ? ' (matching filters)' : ''}
                 </span>
-                <span className="shrink-0 w-16 text-right">Stock</span>
+                <span className="shrink-0 w-16 text-right hidden sm:block">Stock</span>
                 <span className="shrink-0 w-24 text-right hidden sm:block">Cost</span>
-                <span className="shrink-0 w-24 text-right">Price</span>
-                <span className="shrink-0 w-24 text-right">Margin</span>
+                <span className="shrink-0 w-24 text-right hidden sm:block">Price</span>
+                <span className="shrink-0 w-24 text-right hidden sm:block">Margin</span>
               </div>
               {products.map(p => (
                 <button
                   key={p.id}
                   onClick={() => openEdit(p)}
-                  className={`flex items-center gap-3 px-4 py-3 text-left bg-surface hover:bg-primary-soft/40 transition-colors ${
+                  className={`grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 px-4 py-3 text-left bg-surface hover:bg-primary-soft/40 transition-colors sm:flex sm:items-center ${
                     selectedProduct?.id === p.id ? 'bg-primary-soft' : ''
                   }`}
                 >
@@ -278,17 +278,29 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
                     checked={selectedIds.has(p.id)}
                     onChange={e => { e.stopPropagation(); toggleSelect(p.id) }}
                     onClick={e => e.stopPropagation()}
-                    className="accent-primary shrink-0"
+                    className="accent-primary shrink-0 mt-1 sm:mt-0"
                   />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-base font-bold text-ink truncate">{p.name}</p>
+                  <div className="min-w-0 sm:flex-1">
+                    <p className="text-base font-bold text-ink break-words sm:truncate">{p.name}</p>
                     <p className="text-sm text-ink-soft">{p.product_categories?.name ?? 'Uncategorized'}{p.volume ? ` · ${p.volume}` : ''}</p>
                   </div>
                   {!p.is_active && <span className="text-[0.625rem] font-bold text-ink-faint bg-surface-sunken px-2 py-0.5 rounded-full shrink-0">Inactive</span>}
-                  <span className="text-sm text-ink-soft tabular shrink-0 w-16 text-right">{p.stocks} left</span>
-                  <span className="text-sm text-ink-soft tabular shrink-0 w-24 text-right hidden sm:block">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
-                  <span className="text-base font-bold text-gold tabular shrink-0 w-24 text-right">{formatPeso(p.price)}</span>
-                  <MarginCell product={p} />
+                  {/* Phones: labeled 4-up stat row under the name. sm+: contents → inline table columns. */}
+                  <div className="col-start-2 col-span-2 grid grid-cols-4 gap-2 sm:contents">
+                    <span className="min-w-0 sm:shrink-0 sm:w-16 sm:text-right">
+                      <span className="block sm:hidden text-[0.625rem] font-semibold uppercase tracking-wide text-ink-faint">Stock</span>
+                      <span className="text-sm text-ink-soft tabular">{p.stocks}<span className="hidden sm:inline"> left</span></span>
+                    </span>
+                    <span className="min-w-0 sm:shrink-0 sm:w-24 sm:text-right">
+                      <span className="block sm:hidden text-[0.625rem] font-semibold uppercase tracking-wide text-ink-faint">Cost</span>
+                      <span className="text-sm text-ink-soft tabular">{p.cost > 0 ? formatPeso(p.cost) : '—'}</span>
+                    </span>
+                    <span className="min-w-0 sm:shrink-0 sm:w-24 sm:text-right">
+                      <span className="block sm:hidden text-[0.625rem] font-semibold uppercase tracking-wide text-ink-faint">Price</span>
+                      <span className="text-base font-bold text-gold tabular">{formatPeso(p.price)}</span>
+                    </span>
+                    <MarginCell product={p} />
+                  </div>
                 </button>
               ))}
             </div>
@@ -339,11 +351,14 @@ export default function ProductsClient({ initialProducts, categories }: Props) {
 
 function MarginCell({ product }: { product: Product }) {
   const m = marginOf(product)
-  if (m.kind === 'unpriced') return <span className="shrink-0 w-24 text-right text-[0.6875rem] text-ink-faint">No price</span>
-  if (m.kind === 'no_cost') return <span className="shrink-0 w-24 text-right text-[0.6875rem] text-ink-faint">No cost set</span>
+  const box = 'min-w-0 sm:shrink-0 sm:w-24 sm:text-right'
+  const label = <span className="block sm:hidden text-[0.625rem] font-semibold uppercase tracking-wide text-ink-faint">Margin</span>
+  if (m.kind === 'unpriced') return <span className={box}>{label}<span className="text-[0.6875rem] text-ink-faint">No price</span></span>
+  if (m.kind === 'no_cost') return <span className={box}>{label}<span className="text-[0.6875rem] text-ink-faint">No cost set</span></span>
   const color = m.kind === 'loss' ? 'text-danger' : m.kind === 'low' ? 'text-warning' : 'text-primary'
   return (
-    <span className={`shrink-0 w-24 text-right tabular leading-tight ${color}`}>
+    <span className={`${box} tabular leading-tight ${color}`}>
+      {label}
       <span className="block text-base font-semibold">{formatPeso(m.amount)}</span>
       <span className="block text-xs">{m.kind === 'loss' ? 'loss' : `${m.pct.toFixed(0)}%`}</span>
     </span>
